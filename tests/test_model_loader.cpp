@@ -21,5 +21,21 @@ int main() {
     }
     std::printf("loader ok: arch=%s d_model=%u layers=%u heads=%u vocab=%u\n",
                 c.arch.c_str(), c.d_model, c.n_layers, c.n_heads, c.vocab_size);
+
+    // Prompt-conditioning config (nemotron). Skips silently if the fixture is
+    // absent so the default suite is unaffected.
+    if (const char* npath = std::getenv("PARAKEET_TEST_GGUF_NEMOTRON")) {
+        pk::ModelLoader nl;
+        if (!nl.load(npath)) { std::fprintf(stderr, "load nemotron failed\n"); return 1; }
+        const pk::ParakeetConfig& nc = nl.config();
+        if (!nc.prompt.present) { std::fprintf(stderr, "prompt.present false\n"); return 1; }
+        if (nc.prompt.num_prompts != 128) { std::fprintf(stderr, "num_prompts!=128\n"); return 1; }
+        if (nc.prompt.default_lang != "auto") { std::fprintf(stderr, "default_lang!=auto\n"); return 1; }
+        if (nc.prompt.lang_to_index("de") != 9) { std::fprintf(stderr, "de!=9\n"); return 1; }
+        if (nc.prompt.lang_to_index("auto") != 101) { std::fprintf(stderr, "auto!=101\n"); return 1; }
+        if (nc.prompt.lang_to_index("zzz") != -1) { std::fprintf(stderr, "unknown!=-1\n"); return 1; }
+        if (nc.use_bias) { std::fprintf(stderr, "use_bias should be false\n"); return 1; }
+        std::fprintf(stderr, "nemotron prompt config OK\n");
+    }
     return 0;
 }

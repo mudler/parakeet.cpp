@@ -24,6 +24,21 @@ struct StreamingCfg {
     int32_t drop_extra_pre_encoded=0;
     bool present=false;                           // true only for streaming models
 };
+// Prompt-conditioning config (multilingual nemotron). present=false for all
+// existing models, which then skip the prompt stage entirely.
+struct PromptCfg {
+    bool present = false;
+    uint32_t num_prompts = 0;
+    std::string default_lang;                       // e.g. "auto"
+    std::vector<std::string> dict_keys;             // locale strings
+    std::vector<int32_t>     dict_vals;             // parallel prompt indices
+    // Resolve a locale to its prompt index; -1 if unknown.
+    int lang_to_index(const std::string& lang) const {
+        for (size_t i = 0; i < dict_keys.size(); ++i)
+            if (dict_keys[i] == lang) return (int)dict_vals[i];
+        return -1;
+    }
+};
 struct ParakeetConfig {
     std::string arch;
     // encoder
@@ -36,7 +51,9 @@ struct ParakeetConfig {
     std::string att_context_style="regular";            // or "chunked_limited"
     bool causal_downsampling=false;                     // causal subsampling pad
     bool conv_causal=false;                             // causal depthwise conv pad
+    bool use_bias=true;     // false for nemotron (encoder linears have no bias)
     StreamingCfg streaming;
+    PromptCfg prompt;       // prompt conditioning (present=false for non-prompt)
     // preprocessor
     uint32_t sample_rate=16000, n_mels=0, n_fft=0, win_length=0, hop_length=0;
     float preemph=0.0f, mag_power=2.0f, log_zero_guard=0.0f;

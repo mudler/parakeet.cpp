@@ -25,6 +25,16 @@ static std::vector<int32_t> kv_i32_arr(gguf_context* g, const char* k){
     }
     return out;
 }
+static std::vector<std::string> kv_str_arr(gguf_context* g, const char* k){
+    std::vector<std::string> out;
+    int64_t id = gguf_find_key(g,k);
+    if(id>=0 && gguf_get_arr_type(g,id)==GGUF_TYPE_STRING){
+        size_t n = gguf_get_arr_n(g,id);
+        out.resize(n);
+        for(size_t i=0;i<n;++i) out[i] = gguf_get_arr_str(g,id,i);
+    }
+    return out;
+}
 static float kv_f32(gguf_context* g, const char* k, float d=0){
     int64_t id = gguf_find_key(g,k); return id<0 ? d : gguf_get_val_f32(g,id);
 }
@@ -119,6 +129,18 @@ bool ModelLoader::load(const std::string& path){
     cfg_.att_context_style = kv_str(gguf_, "parakeet.encoder.att_context_style", "regular");
     cfg_.causal_downsampling = kv_bool(gguf_, "parakeet.encoder.causal_downsampling", false);
     cfg_.conv_causal = kv_bool(gguf_, "parakeet.encoder.conv_causal", false);
+    // encoder.use_bias: false for nemotron (the attention/FFN linear projections
+    // carry no bias tensor). Defaults true so existing models are unaffected.
+    cfg_.use_bias = kv_bool(gguf_, "parakeet.encoder.use_bias", true);
+    // Prompt conditioning (multilingual nemotron). Orthogonal capability flag;
+    // absent -> present=false and the engine skips the prompt stage entirely.
+    cfg_.prompt.present = kv_bool(gguf_, "parakeet.prompt.present", false);
+    if(cfg_.prompt.present){
+        cfg_.prompt.num_prompts  = kv_u32(gguf_, "parakeet.prompt.num_prompts", 0);
+        cfg_.prompt.default_lang = kv_str(gguf_, "parakeet.prompt.default_lang", "");
+        cfg_.prompt.dict_keys = kv_str_arr(gguf_, "parakeet.prompt.dictionary.keys");
+        cfg_.prompt.dict_vals = kv_i32_arr(gguf_, "parakeet.prompt.dictionary.values");
+    }
     if(cfg_.att_context_style != "regular"){
         StreamingCfg& s = cfg_.streaming;
         s.chunk_size = kv_i32_arr(gguf_, "parakeet.streaming.chunk_size");
