@@ -17,7 +17,9 @@
 
 // ABI version. Bump on breaking changes.
 // v3: target_lang variants (transcribe_path_lang / transcribe_pcm_lang /
-//     stream_begin_lang) for multilingual prompt-conditioned (nemotron) models.
+//     stream_begin_lang / transcribe_pcm_batch_json_lang /
+//     transcribe_pcm_batch_lang) for multilingual prompt-conditioned (nemotron)
+//     models.
 #define PARAKEET_CAPI_ABI_VERSION 3
 
 // The opaque context: a loaded model plus a buffer for the last error message.
@@ -268,17 +270,20 @@ extern "C" char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* sa
                                              decoder, nullptr);
 }
 
-extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
-                                                  const float* const* samples,
-                                                  const int* n_samples, int n_clips,
-                                                  int sample_rate, int decoder,
-                                                  char** out) {
+extern "C" int parakeet_capi_transcribe_pcm_batch_lang(parakeet_ctx* ctx,
+                                                       const float* const* samples,
+                                                       const int* n_samples, int n_clips,
+                                                       int sample_rate, int decoder,
+                                                       const char* target_lang,
+                                                       char** out) {
     if (!ctx) return 1;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return 1; }
     if (!samples || !n_samples || !out || n_clips < 0) {
         ctx->last_error = "invalid batch arguments";
         return 1;
     }
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = target_lang ? target_lang : "";
     // Contract: on any error path (validation, exception, OOM) every out[]
     // entry is left NULL, so the caller owns nothing and frees nothing.
     for (int i = 0; i < n_clips; ++i) out[i] = nullptr;
@@ -292,7 +297,7 @@ extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
             pcms[i].assign(samples[i], samples[i] + n_samples[i]);
         }
         std::vector<std::string> texts =
-            ctx->model->transcribe_pcm_batch(pcms, sample_rate, to_decoder(decoder));
+            ctx->model->transcribe_pcm_batch(pcms, sample_rate, to_decoder(decoder), lang);
         ctx->last_error.clear();
         for (int i = 0; i < n_clips; ++i) {
             char* s = dup_to_c(texts[i]);
@@ -313,6 +318,16 @@ extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
         ctx->last_error = "unknown error";
         return 3;
     }
+}
+
+extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
+                                                  const float* const* samples,
+                                                  const int* n_samples, int n_clips,
+                                                  int sample_rate, int decoder,
+                                                  char** out) {
+    // Delegate with the model default language.
+    return parakeet_capi_transcribe_pcm_batch_lang(ctx, samples, n_samples, n_clips,
+                                                   sample_rate, decoder, nullptr, out);
 }
 
 extern "C" char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx,
@@ -342,14 +357,16 @@ extern "C" char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx,
     }
 }
 
-extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
+extern "C" char* parakeet_capi_transcribe_pcm_batch_json_lang(parakeet_ctx* ctx,
         const float* samples_concat, const int* n_samples, int n_clips,
-        int sample_rate, int decoder) {
+        int sample_rate, int decoder, const char* target_lang) {
     if (!ctx) return nullptr;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
     if (!samples_concat || !n_samples || n_clips < 0) {
         ctx->last_error = "invalid batch arguments"; return nullptr;
     }
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = target_lang ? target_lang : "";
     try {
         std::vector<std::vector<float>> pcms(n_clips);
         size_t off = 0;
@@ -360,7 +377,7 @@ extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
         }
         std::vector<pk::Transcription> trs =
             ctx->model->transcribe_pcm_batch_with_timestamps(pcms, sample_rate,
-                                                             to_decoder(decoder));
+                                                             to_decoder(decoder), lang);
         const pk::ParakeetConfig& cfg = ctx->model->config();
         const float frame_sec =
             (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
@@ -379,6 +396,15 @@ extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
     } catch (...) {
         ctx->last_error = "unknown error"; return nullptr;
     }
+}
+
+extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
+        const float* samples_concat, const int* n_samples, int n_clips,
+        int sample_rate, int decoder) {
+    // Delegate with the model default language.
+    return parakeet_capi_transcribe_pcm_batch_json_lang(ctx, samples_concat, n_samples,
+                                                        n_clips, sample_rate, decoder,
+                                                        nullptr);
 }
 
 // ---------------------------------------------------------------------------

@@ -19,9 +19,11 @@ typedef struct parakeet_ctx parakeet_ctx;
 // function signatures or semantics below.
 //
 // v3: added the target_lang variants (parakeet_capi_transcribe_path_lang,
-//     parakeet_capi_transcribe_pcm_lang, parakeet_capi_stream_begin_lang) for
-//     multilingual prompt-conditioned (nemotron) models. The original non-lang
-//     entry points are unchanged and delegate with the model default language.
+//     parakeet_capi_transcribe_pcm_lang, parakeet_capi_stream_begin_lang,
+//     parakeet_capi_transcribe_pcm_batch_json_lang,
+//     parakeet_capi_transcribe_pcm_batch_lang) for multilingual
+//     prompt-conditioned (nemotron) models. The original non-lang entry points
+//     are unchanged and delegate with the model default language.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -79,6 +81,20 @@ int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
                                        int sample_rate, int decoder,
                                        char** out);
 
+// Like parakeet_capi_transcribe_pcm_batch but selects the language prompt for
+// multilingual (nemotron) models. ONE `target_lang` applies to the whole batch:
+// a locale string (e.g. "en", "de", "auto"); NULL or "" uses the model's
+// default ("auto"). Ignored by non-prompt models. On an unknown locale (for a
+// prompt model) returns nonzero, sets the context's last error, and leaves
+// every out[] entry NULL. parakeet_capi_transcribe_pcm_batch delegates here
+// with the model default.
+int parakeet_capi_transcribe_pcm_batch_lang(parakeet_ctx* ctx,
+                                            const float* const* samples,
+                                            const int* n_samples, int n_clips,
+                                            int sample_rate, int decoder,
+                                            const char* target_lang,
+                                            char** out);
+
 // Transcribe a WAV file returning a malloc'd UTF-8 JSON document with per-word
 // and per-token timestamps + confidence (matching NeMo timestamps=True and the
 // 'max_prob' confidence method). `decoder` is as in
@@ -110,6 +126,18 @@ char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
                                               const float* samples_concat,
                                               const int* n_samples, int n_clips,
                                               int sample_rate, int decoder);
+
+// Like parakeet_capi_transcribe_pcm_batch_json but selects the language prompt
+// for multilingual (nemotron) models. ONE `target_lang` applies to the whole
+// batch: a locale string (e.g. "en", "de", "auto"); NULL or "" uses the model's
+// default ("auto"). Ignored by non-prompt models. On an unknown locale (for a
+// prompt model) returns NULL and sets the context's last error.
+// parakeet_capi_transcribe_pcm_batch_json delegates here with the model default.
+char* parakeet_capi_transcribe_pcm_batch_json_lang(parakeet_ctx* ctx,
+                                                   const float* samples_concat,
+                                                   const int* n_samples, int n_clips,
+                                                   int sample_rate, int decoder,
+                                                   const char* target_lang);
 
 // ---------------------------------------------------------------------------
 // Streaming API (cache-aware streaming RNN-T, e.g. the EOU model
