@@ -94,6 +94,17 @@ inline bool load_baseline_i32(const std::string& path, const std::string& name,
     return true;
 }
 
+// Read a uint32 KV entry from a baseline gguf (0 if absent / unopenable).
+inline uint32_t pktest_read_u32(const std::string& path, const std::string& key) {
+    gguf_init_params p{ /*no_alloc=*/true, /*ctx=*/nullptr };
+    gguf_context* g = gguf_init_from_file(path.c_str(), p);
+    if (!g) return 0;
+    int64_t id = gguf_find_key(g, key.c_str());
+    uint32_t v = (id < 0) ? 0u : gguf_get_val_u32(g, id);
+    gguf_free(g);
+    return v;
+}
+
 // Load a string KV entry from a baseline gguf.
 inline bool load_kv_str(const std::string& path, const std::string& key,
                          std::string& out) {

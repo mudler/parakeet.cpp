@@ -74,6 +74,7 @@ set(PARAKEET_SRC
     src/ctc_decoder.cpp
     src/prediction.cpp
     src/joint.cpp
+    src/prompt_kernel.cpp
     src/tdt.cpp
     src/rnnt.cpp
     src/transducer_batch.cpp
