@@ -81,7 +81,7 @@ static int cmd_info(const char* path) {
 // When `timestamps` is set, also prints one line per finalized word
 // (`<start>-<end>  <word>  (<conf>)`) after the running text/EOU line.
 static int cmd_transcribe_stream(const std::string& model, const std::string& input,
-                                 bool timestamps) {
+                                 bool timestamps, const std::string& lang) {
     pk::ModelLoader ml;
     if (!ml.load(model)) {
         std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -100,7 +100,12 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
     }
 
     try {
-        pk::StreamingSession sess(ml);
+        // `lang` selects the language prompt for multilingual (nemotron) prompt
+        // models; empty -> the model default, and non-prompt models ignore it.
+        // This is exactly what parakeet_capi_stream_begin_lang forwards to the
+        // StreamingSession ctor — done directly here so the CLI keeps its rich
+        // per-word / EOU-timestamp output the flat stream C-API does not expose.
+        pk::StreamingSession sess(ml, lang);
         std::vector<pk::Word> all_words;  // collected for the --timestamps recap
         std::printf("[stream] ");
         std::fflush(stdout);
@@ -149,7 +154,7 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
 // archs, CTC for ctc arch — matching NeMo's cur_decoder default). --stream uses
 // the cache-aware streaming path (EOU streaming model only).
 static int cmd_transcribe(int argc, char** argv) {
-    std::string model, input, decoder_str;
+    std::string model, input, decoder_str, lang;
     bool stream = false;
     bool timestamps = false;
     bool json = false;
@@ -161,6 +166,8 @@ static int cmd_transcribe(int argc, char** argv) {
             input = argv[++i];
         } else if (std::strcmp(argv[i], "--decoder") == 0 && i + 1 < argc) {
             decoder_str = argv[++i];
+        } else if (std::strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+            lang = argv[++i];
         } else if (std::strcmp(argv[i], "--stream") == 0) {
             stream = true;
         } else if (std::strcmp(argv[i], "--timestamps") == 0) {
@@ -174,7 +181,8 @@ static int cmd_transcribe(int argc, char** argv) {
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli transcribe --model <m.gguf> --input <wav> "
-            "[--decoder ctc|tdt] [--stream] [--timestamps] [--threads N] [--json]\n");
+            "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
+            "[--threads N] [--json]\n");
         return 2;
     }
     // Apply the thread override (offline + streaming graph compute). When unset
@@ -191,7 +199,7 @@ static int cmd_transcribe(int argc, char** argv) {
                 "parakeet-cli: --json is not supported with --stream\n");
             return 2;
         }
-        return cmd_transcribe_stream(model, input, timestamps);
+        return cmd_transcribe_stream(model, input, timestamps, lang);
     }
 
     // Resolve the decoder selector.
@@ -239,7 +247,9 @@ static int cmd_transcribe(int argc, char** argv) {
                 std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
                 return 1;
             }
-            pk::Transcription tr = m->transcribe_path_with_timestamps(input, dec);
+            // `lang` (empty -> model default) selects the language prompt for
+            // multilingual models; ignored by non-prompt models.
+            pk::Transcription tr = m->transcribe_path_with_timestamps(input, dec, lang);
             for (const pk::Word& w : tr.words)
                 std::printf("%.2f-%.2f  %s  (%.2f)\n", w.start, w.end,
                             w.text.c_str(), w.conf);
@@ -247,6 +257,29 @@ static int cmd_transcribe(int argc, char** argv) {
             std::fprintf(stderr, "transcribe failed: %s\n", e.what());
             return 1;
         }
+        return 0;
+    }
+
+    // Plain transcript. When --lang is given, go through the load-once C-API
+    // language variant so the language prompt is selected (and an unknown locale
+    // surfaces as a clean error). With no --lang keep the existing free-function
+    // path so behavior for every other model is byte-for-byte unchanged.
+    if (!lang.empty()) {
+        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        if (!ctx) {
+            std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+            return 1;
+        }
+        char* t = parakeet_capi_transcribe_path_lang(ctx, input.c_str(), dec_int,
+                                                     lang.c_str());
+        if (!t) {
+            std::fprintf(stderr, "transcribe failed: %s\n", parakeet_capi_last_error(ctx));
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        std::printf("%s\n", t);
+        parakeet_capi_free_string(t);
+        parakeet_capi_free(ctx);
         return 0;
     }
 
@@ -1142,7 +1175,8 @@ int main(int argc, char** argv) {
         "usage:\n"
         "  parakeet-cli info <model.gguf>\n"
         "  parakeet-cli transcribe --model <model.gguf> --input <wav> "
-        "[--decoder ctc|tdt] [--stream] [--timestamps] [--threads N] [--json]\n"
+        "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
+        "[--threads N] [--json]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n"
         "  parakeet-cli bench --model <model.gguf> --manifest <file> "
