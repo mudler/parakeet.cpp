@@ -153,6 +153,88 @@ def _get_md_flag(m, key):
         return getattr(md, key, None)
 
 
+def _prompt_streaming_text(m, feats, feat_len, pidx, num_prompts, specials):
+    """NeMo cache-aware *streaming* transcript for a prompt model, with the
+    language prompt applied (the authoritative streaming target for the C++
+    StreamingSession).
+
+    Mirrors ``gen_stream_baseline.py`` for the encoder side, then applies the
+    SAME prompt branch as the offline forward (transpose -> cat(onehot) ->
+    prompt_kernel -> transpose) to the concatenated streamed encoder output, and
+    decodes the whole prompt-conditioned streamed output in one shot (the
+    cache-aware-equivalence property makes single-shot decode of the streamed
+    output == per-chunk decode carrying state, which is what the C++ session does).
+
+    Returns (stream_text, stream_token_ids[list]). Returns (None, None) when the
+    encoder is not a cache-aware streaming encoder (so the caller can skip the KV).
+    """
+    import torch
+
+    enc = m.encoder
+    if not hasattr(enc, "cache_aware_stream_step"):
+        return None, None
+    from nemo.collections.asr.parts.utils.streaming_utils import (
+        CacheAwareStreamingAudioBuffer,
+    )
+
+    enc.setup_streaming_params()
+    sc = enc.streaming_cfg
+
+    sb = CacheAwareStreamingAudioBuffer(
+        model=m, online_normalization=False, pad_and_drop_preencoded=False
+    )
+    sb.append_processed_signal(feats, stream_id=-1)
+    sb_iter = iter(sb)
+    cache_last_channel, cache_last_time, cache_last_channel_len = (
+        enc.get_initial_cache_state(batch_size=1)
+    )
+
+    outs = []
+    for step_num, (chunk_audio, chunk_lengths) in enumerate(sb_iter):
+        drop = sc.drop_extra_pre_encoded if step_num != 0 else 0
+        keep_all = sb.is_buffer_empty()
+        with torch.no_grad():
+            (e, el, cache_last_channel, cache_last_time, cache_last_channel_len) = (
+                enc.cache_aware_stream_step(
+                    processed_signal=chunk_audio,
+                    processed_signal_length=chunk_lengths,
+                    cache_last_channel=cache_last_channel,
+                    cache_last_time=cache_last_time,
+                    cache_last_channel_len=cache_last_channel_len,
+                    keep_all_outputs=keep_all,
+                    drop_extra_pre_encoded=drop,
+                )
+            )
+        valid = int(el[0].item())
+        outs.append(e[:, :, :valid].detach())  # [1, d_model, valid]
+
+    stream_enc = torch.cat(outs, dim=2)  # [1, d_model, T']
+    Tp = stream_enc.shape[2]
+    stream_len = torch.tensor([Tp], dtype=torch.int64)
+
+    # Apply the language prompt to the streamed encoder output (same branch as
+    # the offline forward; one-hot constant over time).
+    with torch.no_grad():
+        encoded = stream_enc.transpose(1, 2)                      # [1, T', D]
+        onehot = torch.zeros(1, Tp, num_prompts, dtype=encoded.dtype)
+        onehot[:, :, pidx] = 1.0
+        concat = torch.cat([encoded, onehot], dim=-1)             # [1, T', D+P]
+        pk_out = m.prompt_kernel(concat)                          # [1, T', D]
+        pk_enc = pk_out.transpose(1, 2).contiguous()             # [1, D, T']
+        hyps = m.decoding.rnnt_decoder_predictions_tensor(
+            encoder_output=pk_enc, encoded_lengths=stream_len, return_hypotheses=True
+        )
+    first = hyps[0] if isinstance(hyps, list) else hyps
+    if isinstance(first, list):
+        first = first[0]
+    ys = first.y_sequence
+    ys = ys.cpu().tolist() if hasattr(ys, "cpu") else list(ys)
+    stream_ids = [int(t) for t in ys]
+    non_special = [t for t in stream_ids if t not in specials]
+    stream_text = m.tokenizer.ids_to_text(non_special)
+    return stream_text, stream_ids
+
+
 def dump_prompt_baseline(m, args):
     """Dump the prompt-model baseline for a fixed target_lang:
 
@@ -161,7 +243,9 @@ def dump_prompt_baseline(m, args):
                                           i.e. NeMo's forward() prompt branch.
       * ``rnnt_token_ids``    ``[L]`` int32  NeMo RNNT greedy ids for this lang.
       * KVs: baseline.target_lang, baseline.prompt_index,
-             baseline.rnnt_token_count, baseline.rnnt_text.
+             baseline.rnnt_token_count, baseline.rnnt_text,
+             baseline.stream_text (cache-aware streaming transcript WITH prompt,
+             EOU/EOB stripped — the authoritative target for StreamingSession).
 
     Mirrors NeMo EncDecRNNTBPEModelWithPrompt.forward():
       encoded(B,D,T) -> transpose -> cat(onehot) -> prompt_kernel -> transpose.
@@ -225,6 +309,24 @@ def dump_prompt_baseline(m, args):
     rnnt_ids = np.array(list(ys), dtype=np.int32)
     rnnt_text = first.text if hasattr(first, "text") else str(first)
 
+    # Resolve <EOU>/<EOB> special ids (if any) so the streaming transcript strips
+    # them exactly as StreamingSession does (specials surface as events, not text).
+    specials = set()
+    for tok in ("<EOU>", "<EOB>"):
+        try:
+            ids = m.tokenizer.tokens_to_ids([tok])
+            if ids and int(ids[0]) >= 0:
+                specials.add(int(ids[0]))
+        except Exception:
+            pass
+
+    # Cache-aware STREAMING transcript WITH the language prompt — the authoritative
+    # target for the C++ StreamingSession. None if the model isn't a streaming
+    # (cache-aware) encoder, in which case the KV is omitted.
+    stream_text, stream_ids = _prompt_streaming_text(
+        m, feats, flen, pidx, num_prompts, specials
+    )
+
     w = gguf.GGUFWriter(args.output, "parakeet-baseline-prompt")
     w.add_string("baseline.target_lang", target_lang)
     w.add_uint32("baseline.prompt_index", pidx)
@@ -235,6 +337,12 @@ def dump_prompt_baseline(m, args):
     if rnnt_ids.shape[0] > 0:
         w.add_tensor("rnnt_token_ids", np.ascontiguousarray(rnnt_ids))
     w.add_string("baseline.rnnt_text", rnnt_text)
+    if stream_text is not None:
+        w.add_string("baseline.stream_text", stream_text)
+        sids = np.array(stream_ids, dtype=np.int32)
+        w.add_uint32("baseline.stream_token_count", int(sids.shape[0]))
+        if sids.shape[0] > 0:
+            w.add_tensor("stream_token_ids", np.ascontiguousarray(sids))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -243,6 +351,10 @@ def dump_prompt_baseline(m, args):
         f"wrote {args.output}: prompt baseline lang={target_lang} idx={pidx} "
         f"tokens={rnnt_ids.shape[0]} text={rnnt_text!r}"
     )
+    if stream_text is not None:
+        print(f"  baseline.stream_text={stream_text!r} (stream_tokens={len(stream_ids)})")
+    else:
+        print("  baseline.stream_text: SKIPPED (encoder is not cache-aware streaming)")
 
 
 def _timestamps_decoding_cfg(m):

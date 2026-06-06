@@ -51,6 +51,7 @@ pk_add_test(test_transcribe_rnnt)
 pk_add_test(test_transcribe_eou)
 pk_add_test(test_transcribe_nemotron)
 pk_add_test(test_streaming_decode)
+pk_add_test(test_streaming_nemotron)
 pk_add_test(test_streaming_mel)
 pk_add_test(test_capi)
 pk_add_test(test_capi_batch)
@@ -66,7 +67,7 @@ set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling te
                      test_timestamps_tokens test_timestamps test_transcribe_batch_ts test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou test_transcribe_nemotron
-                     test_streaming_decode test_streaming_mel test_capi test_capi_batch test_capi_stream
+                     test_streaming_decode test_streaming_nemotron test_streaming_mel test_capi test_capi_batch test_capi_stream
                      test_capi_timestamps test_capi_batch_json
                      PROPERTIES LABELS "model")
 # These tests read fixtures/baselines via paths relative to the project root.
@@ -81,7 +82,7 @@ set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_bat
                      test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou test_transcribe_nemotron
-                     test_streaming_decode test_streaming_mel test_capi test_capi_batch test_capi_stream
+                     test_streaming_decode test_streaming_nemotron test_streaming_mel test_capi test_capi_batch test_capi_stream
                      test_capi_timestamps test_capi_batch_json
                      PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
