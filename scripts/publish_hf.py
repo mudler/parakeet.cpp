@@ -62,6 +62,7 @@ DEFAULT_VARIANTS = ["f16", "q8_0", "q6_k", "q5_k", "q4_k"]
 ALL_MODELS = [
     "nvidia/parakeet-tdt_ctc-110m",
     "nvidia/parakeet_realtime_eou_120m-v1",
+    "nvidia/nemotron-3.5-asr-streaming-0.6b",
     "nvidia/parakeet-ctc-0.6b",
     "nvidia/parakeet-rnnt-0.6b",
     "nvidia/parakeet-tdt-0.6b-v2",
@@ -120,7 +121,33 @@ KNOWN_WER: dict = {
         "q8_0": {"wer": 0.0, "size_mb": None},
         "q4_k": {"wer": None, "size_mb": None},
     },
+    # Multilingual prompt-conditioned streaming model. WER measured offline
+    # (en/de/auto) by scripts/e2e_nemo_compare.py vs NeMo; all five variants are
+    # byte-for-byte (WER 0.0). prompt_kernel + LSTM + featurizer tensors stay F32.
+    "nvidia/nemotron-3.5-asr-streaming-0.6b": {
+        "f16":  {"wer": 0.0, "size_mb": 1484.3},
+        "q8_0": {"wer": 0.0, "size_mb": 983.7},
+        "q6_k": {"wer": 0.0, "size_mb": 855.7},
+        "q5_k": {"wer": 0.0, "size_mb": 784.8},
+        "q4_k": {"wer": 0.0, "size_mb": 718.1},
+    },
 }
+
+# Per-model SPDX license id + human label, used in the generated card frontmatter
+# and the License section. Defaults to CC-BY-4.0 (the NVIDIA NeMo Parakeet
+# checkpoints); nemotron-3.5-asr-streaming is released under OpenMDW-1.1.
+DEFAULT_LICENSE = ("cc-by-4.0", "CC-BY-4.0",
+                   "https://creativecommons.org/licenses/by/4.0/")
+LICENSES: dict = {
+    "nvidia/nemotron-3.5-asr-streaming-0.6b": (
+        "other", "OpenMDW-1.1", "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+    ),
+}
+
+
+def _license(model_id: str) -> tuple[str, str, str]:
+    """(frontmatter license id, human label, upstream/license url) for *model_id*."""
+    return LICENSES.get(model_id, DEFAULT_LICENSE)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -283,6 +310,12 @@ def _size_str(size_mb, path: Optional[Path] = None) -> str:
 def _arch_info(model_id: str) -> tuple[str, str]:
     """Infer (arch_desc, decoder heads) from the model name."""
     name_lower = model_id.lower()
+    if "nemotron" in name_lower:
+        return (
+            "Cache-aware streaming, multilingual, prompt-conditioned RNNT "
+            "(FastConformer, 40+ locales, --lang <locale>)",
+            "RNNT (streaming, prompt-conditioned)",
+        )
     if "realtime_eou" in name_lower or "realtime-eou" in name_lower:
         return "Cache-aware streaming RNNT (FastConformer, EOU/EOB)", "RNNT (streaming)"
     if "tdt_ctc" in name_lower:
@@ -307,13 +340,16 @@ def build_model_card(
     wer_data = KNOWN_WER.get(model_id, {})
 
     arch_desc, heads = _arch_info(model_id)
+    lic_id, lic_label, lic_url = _license(model_id)
 
     lines: List[str] = []
 
-    # YAML frontmatter
+    # YAML frontmatter. For a non-SPDX license (license: other) HF wants an
+    # explicit license_name + license_link.
+    lines += ["---", f"license: {lic_id}"]
+    if lic_id == "other":
+        lines += [f"license_name: {lic_label}", f"license_link: {lic_url}"]
     lines += [
-        "---",
-        "license: cc-by-4.0",
         "library_name: parakeet.cpp",
         "tags:",
         "  - automatic-speech-recognition",
@@ -431,8 +467,8 @@ def build_model_card(
     lines.append("## License")
     lines.append("")
     lines.append(
-        "The GGUF weights are derived from the NVIDIA NeMo Parakeet checkpoints, "
-        "which are released under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license. "
+        f"The GGUF weights are derived from [{model_id}](https://huggingface.co/{model_id}), "
+        f"released under the [{lic_label}]({lic_url}) license. "
         "The parakeet.cpp runtime is MIT-licensed."
     )
     lines.append("")
@@ -551,8 +587,24 @@ def build_collection_card(
     """One combined model card for the whole collection repo."""
     lines: List[str] = []
 
-    # YAML frontmatter — base_model accepts a list.
-    lines += ["---", "license: cc-by-4.0", "library_name: parakeet.cpp", "tags:"]
+    # YAML frontmatter — base_model accepts a list. Licenses can differ per model
+    # (most are CC-BY-4.0; nemotron is OpenMDW-1.1), so when the collection mixes
+    # licenses we declare `other` here and spell each one out in the License
+    # section / per-model rows below.
+    licenses = {_license(m) for m in models}
+    if len(licenses) == 1:
+        only_id, only_label, only_url = next(iter(licenses))
+        lines = ["---", f"license: {only_id}"]
+        if only_id == "other":
+            lines += [f"license_name: {only_label}", f"license_link: {only_url}"]
+        lines += ["library_name: parakeet.cpp", "tags:"]
+    else:
+        lines = [
+            "---", "license: other",
+            "license_name: mixed (see per-model licenses below)",
+            f"license_link: https://huggingface.co/{repo_id}",
+            "library_name: parakeet.cpp", "tags:",
+        ]
     lines += [f"  - {t}" for t in (
         "automatic-speech-recognition", "asr", "parakeet",
         "gguf", "ggml", "cpp-inference", "nemo",
@@ -585,11 +637,12 @@ def build_collection_card(
         arch_desc, heads = _arch_info(model_id)
         wer_data = KNOWN_WER.get(model_id, {})
         vp = paths_by_model.get(model_id, {})
+        _lic_id, _lic_label, _lic_url = _license(model_id)
         lines.append(f"### {slug}")
         lines.append("")
         lines.append(
             f"Source: [{model_id}](https://huggingface.co/{model_id}) · "
-            f"{arch_desc} · heads: {heads}"
+            f"{arch_desc} · heads: {heads} · license: [{_lic_label}]({_lic_url})"
         )
         lines.append("")
         lines.append("| File | Variant | Size | WER vs NeMo |")
@@ -645,14 +698,23 @@ def build_collection_card(
     lines.append("```")
     lines.append("")
 
-    # License.
+    # License. Each GGUF inherits the license of its source checkpoint; list them
+    # explicitly because the collection can mix licenses (most CC-BY-4.0, nemotron
+    # OpenMDW-1.1).
     lines.append("## License")
     lines.append("")
     lines.append(
-        "The GGUF weights are derived from the NVIDIA NeMo Parakeet checkpoints, released "
-        "under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license. "
-        "The parakeet.cpp runtime is MIT-licensed."
+        "Each GGUF is derived from its upstream NVIDIA NeMo checkpoint and inherits "
+        "that checkpoint's license. The parakeet.cpp runtime itself is MIT-licensed."
     )
+    lines.append("")
+    lines.append("| Source checkpoint | License |")
+    lines.append("|---|---|")
+    for model_id in models:
+        _lic_id, _lic_label, _lic_url = _license(model_id)
+        lines.append(
+            f"| [{model_id}](https://huggingface.co/{model_id}) | [{_lic_label}]({_lic_url}) |"
+        )
     lines.append("")
 
     return "\n".join(lines)
