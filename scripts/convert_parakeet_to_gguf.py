@@ -53,7 +53,15 @@ def _get(cfg, key, default=None):
 def detect_arch(m):
     """Map a NeMo model to one of ctc/rnnt/tdt/hybrid_rnnt_ctc/hybrid_tdt_ctc."""
     cfg = m.cfg
-    if _get(cfg, "aux_ctc") is not None:
+    # An aux_ctc *config* block is necessary but not sufficient for a hybrid
+    # model: prompt-conditioned RNNT checkpoints (nemotron) carry an unconfigured
+    # aux_ctc stub (num_classes=-1, empty vocabulary) but NO ctc decoder and zero
+    # ctc_decoder.* weights -- NeMo initializes them RNNT-only. Require an actual
+    # ctc_decoder on the model (the same module the engine loads ctc_decoder.*
+    # tensors from) before classifying as hybrid; otherwise fall through to the
+    # rnnt/tdt detection below.
+    has_ctc = getattr(m, "ctc_decoder", None) is not None
+    if _get(cfg, "aux_ctc") is not None and has_ctc:
         loss = _get(_get(cfg, "loss", {}) or {}, "loss_name", "")
         durs = _get(_get(cfg, "decoding", {}) or {}, "durations")
         return "hybrid_tdt_ctc" if (loss == "tdt" or durs) else "hybrid_rnnt_ctc"
@@ -62,6 +70,25 @@ def detect_arch(m):
         nxo = _get(_get(cfg, "joint", {}) or {}, "num_extra_outputs", 0)
         return "tdt" if (durs or (nxo and nxo > 0)) else "rnnt"
     return "ctc"
+
+
+def prompt_config(cfg):
+    """Return (present, num_prompts, dict_keys, dict_vals, default_lang) for a
+    prompt-conditioned model, or (False, 0, [], [], "") otherwise. The prompt
+    feature lives under cfg.model_defaults (initialize_prompt_feature +
+    prompt_dictionary); the projection weights (prompt_kernel.*) are written
+    verbatim by the generic tensor loop, so only the KV metadata is new here."""
+    md = _get(cfg, "model_defaults", {}) or {}
+    if not bool(_get(md, "initialize_prompt_feature", False)):
+        return False, 0, [], [], ""
+    pdict = _get(md, "prompt_dictionary", None)
+    if not pdict:
+        return False, 0, [], [], ""
+    num = int(_get(md, "num_prompts", 128))
+    keys = [str(k) for k in pdict.keys()]
+    vals = [int(pdict[k]) for k in pdict.keys()]
+    default_lang = "auto" if "auto" in pdict else keys[0]
+    return True, num, keys, vals, default_lang
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +197,22 @@ def main():
     w.add_uint32("parakeet.encoder.pos_emb_max_len",
                  int(_get(enc, "pos_emb_max_len", 5000)))
 
+    # encoder bias flag (use_bias=False checkpoints omit the linear biases; the
+    # C++ loader reads them with clone_weight_opt and tolerates absence).
+    w.add_bool("parakeet.encoder.use_bias", bool(_get(enc, "use_bias", True)))
+
+    # --- Prompt conditioning (multilingual nemotron) ------------------------
+    # Orthogonal capability flag (like streaming.present). When present, the C++
+    # engine inserts the prompt_kernel (Linear->ReLU->Linear) on the encoder
+    # output, selected by a one-hot language vector resolved from target_lang.
+    p_present, p_num, p_keys, p_vals, p_default = prompt_config(cfg)
+    if p_present:
+        w.add_bool("parakeet.prompt.present", True)
+        w.add_uint32("parakeet.prompt.num_prompts", p_num)
+        w.add_array("parakeet.prompt.dictionary.keys", p_keys)
+        w.add_array("parakeet.prompt.dictionary.values", p_vals)
+        w.add_string("parakeet.prompt.default_lang", p_default)
+
     # --- Cache-aware streaming / causal config (Phase 5) ---------------------
     # These KVs describe the chunked-limited attention + causal conv that the
     # streaming FastConformer (e.g. parakeet_realtime_eou_120m-v1) uses. They are
@@ -185,9 +228,22 @@ def main():
         # int32 so the -1 sentinel survives if a streaming model ever uses it;
         # the loader reads them as int32 and defaults to -1 when absent.
         att_ctx = _get(enc, "att_context_size", [-1, -1]) or [-1, -1]
-        att_ctx = [int(x) for x in att_ctx]
-        att_left = att_ctx[0] if len(att_ctx) > 0 else -1
-        att_right = att_ctx[1] if len(att_ctx) > 1 else -1
+        # Multi-context models store a LIST of [left,right] presets; the default
+        # is the first (NeMo's default att_context_size index). A flat [l,r]
+        # (older streaming models like the eou) is used as-is. The first element
+        # being a non-scalar (list/tuple/OmegaConf ListConfig) marks the nested
+        # form -- detect it by "not a plain number" rather than an exact type so
+        # OmegaConf's ListConfig is handled too.
+        if att_ctx and not isinstance(att_ctx[0], (int, float)):
+            presets = [[int(x) for x in p] for p in att_ctx]
+            att_left, att_right = presets[0][0], presets[0][1]
+            # Record all presets so a future latency knob can pick another.
+            w.add_array("parakeet.encoder.att_context_presets",
+                        [int(v) for p in presets for v in p])  # flattened [l,r,l,r,...]
+        else:
+            att_ctx = [int(x) for x in att_ctx]
+            att_left = att_ctx[0] if len(att_ctx) > 0 else -1
+            att_right = att_ctx[1] if len(att_ctx) > 1 else -1
         w.add_int32("parakeet.encoder.att_context_left", int(att_left))
         w.add_int32("parakeet.encoder.att_context_right", int(att_right))
         w.add_string("parakeet.encoder.att_context_style", att_style)
