@@ -144,6 +144,107 @@ def _squeeze(arr):
     return np.ascontiguousarray(out)
 
 
+def _get_md_flag(m, key):
+    """Read a model_defaults entry (OmegaConf dict or attr access)."""
+    md = getattr(m.cfg, "model_defaults", {}) or {}
+    try:
+        return md[key]
+    except Exception:
+        return getattr(md, key, None)
+
+
+def dump_prompt_baseline(m, args):
+    """Dump the prompt-model baseline for a fixed target_lang:
+
+      * ``encoder_out``       ``[D, T]``  RAW encoder output (BEFORE prompt).
+      * ``prompt_kernel_out`` ``[T, D]``  prompt_kernel(cat([encoded, onehot])),
+                                          i.e. NeMo's forward() prompt branch.
+      * ``rnnt_token_ids``    ``[L]`` int32  NeMo RNNT greedy ids for this lang.
+      * KVs: baseline.target_lang, baseline.prompt_index,
+             baseline.rnnt_token_count, baseline.rnnt_text.
+
+    Mirrors NeMo EncDecRNNTBPEModelWithPrompt.forward():
+      encoded(B,D,T) -> transpose -> cat(onehot) -> prompt_kernel -> transpose.
+    The one-hot is constant over time (one language per utterance).
+    """
+    import torch
+    import soundfile as sf
+
+    md = m.cfg.model_defaults
+    pdict = md.prompt_dictionary
+    num_prompts = int(md.get("num_prompts", 128))
+    default_lang = "auto" if "auto" in pdict else list(pdict.keys())[0]
+    target_lang = args.lang or default_lang
+    if target_lang not in pdict:
+        keys = list(pdict.keys())
+        print(
+            f"PARAKEET_BASELINE_BAD_LANG: '{target_lang}' not in prompt_dictionary; "
+            f"available (first 10): {keys[:10]}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    pidx = int(pdict[target_lang])
+
+    wav, sr = sf.read(args.audio, dtype="float32", always_2d=False)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    if sr != 16000:
+        print(f"PARAKEET_BASELINE_BAD_AUDIO: expected 16k mono, got sr={sr}",
+              file=sys.stderr)
+        sys.exit(1)
+    wt = torch.from_numpy(np.ascontiguousarray(wav)).float().unsqueeze(0)  # [1, S]
+    lt = torch.tensor([wt.shape[1]], dtype=torch.int64)
+
+    with torch.no_grad():
+        feats, flen = m.preprocessor(input_signal=wt, length=lt)
+        enc, elen = m.encoder(audio_signal=feats, length=flen)  # [1, D, T]
+        encoded = enc.transpose(1, 2)                            # [1, T, D]
+        T = encoded.shape[1]
+        onehot = torch.zeros(1, T, num_prompts, dtype=encoded.dtype)
+        onehot[:, :, pidx] = 1.0
+        concat = torch.cat([encoded, onehot], dim=-1)            # [1, T, D+P]
+        pk_out = m.prompt_kernel(concat)                         # [1, T, D]
+
+    # RNNT greedy reference for this language. We CANNOT use m.transcribe() here:
+    # the prompt model's transcribe dataloader (LhotseSpeechToTextBpeDatasetWith
+    # PromptIndex) resolves the prompt index from each cut's language metadata,
+    # which our bare wav fixture lacks ("Unknown prompt key: 'None'"). Instead we
+    # decode the prompt-conditioned encoder output DIRECTLY via the model's RNNT
+    # decoding object — exactly what _transcribe_output_processing does, and the
+    # same encoder-output the C++ engine feeds its rnnt_greedy after PromptKernel.
+    pk_enc = pk_out.transpose(1, 2).contiguous()                 # [1, D, T] for decoding
+    with torch.no_grad():
+        hyps = m.decoding.rnnt_decoder_predictions_tensor(
+            encoder_output=pk_enc, encoded_lengths=elen, return_hypotheses=True
+        )
+    first = hyps[0] if isinstance(hyps, list) else hyps
+    if isinstance(first, list):  # NBest -> take the top hypothesis
+        first = first[0]
+    ys = first.y_sequence
+    ys = ys.cpu().tolist() if hasattr(ys, "cpu") else list(ys)
+    rnnt_ids = np.array(list(ys), dtype=np.int32)
+    rnnt_text = first.text if hasattr(first, "text") else str(first)
+
+    w = gguf.GGUFWriter(args.output, "parakeet-baseline-prompt")
+    w.add_string("baseline.target_lang", target_lang)
+    w.add_uint32("baseline.prompt_index", pidx)
+    w.add_uint32("baseline.num_prompts", num_prompts)
+    w.add_tensor("encoder_out", _squeeze(enc.cpu().float().numpy()))           # [D, T]
+    w.add_tensor("prompt_kernel_out", _squeeze(pk_out.cpu().float().numpy()))  # [T, D]
+    w.add_uint32("baseline.rnnt_token_count", int(rnnt_ids.shape[0]))
+    if rnnt_ids.shape[0] > 0:
+        w.add_tensor("rnnt_token_ids", np.ascontiguousarray(rnnt_ids))
+    w.add_string("baseline.rnnt_text", rnnt_text)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    print(
+        f"wrote {args.output}: prompt baseline lang={target_lang} idx={pidx} "
+        f"tokens={rnnt_ids.shape[0]} text={rnnt_text!r}"
+    )
+
+
 def _timestamps_decoding_cfg(m):
     """Build a decoding cfg (cloned from the model's own) that turns on
     per-frame/token/word confidence using the reproducible ``max_prob`` method.
@@ -446,6 +547,11 @@ def main():
         "transcripts reflect banded local attention. Anchors the C++ "
         "banded-attention parity tests at NeMo quality.",
     )
+    ap.add_argument(
+        "--lang",
+        default=None,
+        help="target_lang for prompt models (default: model default / auto)",
+    )
     args = ap.parse_args()
 
     is_local = pathlib.Path(args.model).exists()
@@ -483,6 +589,17 @@ def main():
     # baseline behaviour below is completely untouched.
     if args.timestamps:
         _run_timestamps(m, args)
+        return
+
+    # Prompt-conditioned multilingual model (nemotron, EncDecRNNTBPEModelWithPrompt):
+    # dump the raw encoder output, the prompt_kernel projection, and the per-language
+    # RNNT greedy reference. Kept as a separate early path; the encoder-stage hook
+    # baseline below is for the hybrid / pure-RNNT models and is untouched.
+    has_prompt = bool(_get_md_flag(m, "initialize_prompt_feature")) and (
+        getattr(m, "prompt_kernel", None) is not None
+    )
+    if has_prompt:
+        dump_prompt_baseline(m, args)
         return
 
     # Per-layer / module captures via forward hooks. The preprocessor and
