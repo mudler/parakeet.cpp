@@ -9,6 +9,7 @@
 #include "tokenizer.hpp"
 #include "prediction.hpp"
 #include "joint.hpp"
+#include "prompt_kernel.hpp"
 #include "tdt.hpp"
 #include "rnnt.hpp"
 #include "transducer_batch.hpp"
@@ -49,6 +50,32 @@ std::unique_ptr<Model> Model::load(const std::string& gguf_path) {
     return m;
 }
 
+int Model::resolve_prompt_index(const std::string& target_lang) const {
+    const ParakeetConfig& cfg = loader_.config();
+    if (!cfg.prompt.present) return -1;
+    const std::string lang = target_lang.empty() ? cfg.prompt.default_lang : target_lang;
+    int idx = cfg.prompt.lang_to_index(lang);
+    if (idx < 0) {
+        std::string sample;
+        for (size_t i = 0; i < cfg.prompt.dict_keys.size() && i < 8; ++i)
+            sample += (i ? ", " : "") + cfg.prompt.dict_keys[i];
+        throw std::runtime_error("parakeet: unknown target_lang '" + lang +
+                                 "'. Valid examples: " + sample + ", ...");
+    }
+    return idx;
+}
+
+// Apply the prompt-conditioning projection in place on a channels-first encoder
+// output [d_model, Tout], if the model is prompt-conditioned. No-op otherwise.
+static void maybe_apply_prompt(const ModelLoader& loader, std::vector<float>& enc_out,
+                               int d_model, int Tout, int prompt_index) {
+    if (!loader.config().prompt.present) return;
+    PromptKernel pk(loader);
+    std::vector<float> projected;
+    pk.apply(enc_out, d_model, Tout, prompt_index, projected);
+    enc_out.swap(projected);
+}
+
 // Decode one item's encoder output (row-major [d_model, Tout], channels-first)
 // into a transcript. Mirrors the tail of transcribe_16k exactly.
 static std::string decode_enc_out(const ModelLoader& loader,
@@ -82,8 +109,10 @@ static std::string decode_enc_out(const ModelLoader& loader,
 }
 
 std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
-                                  Decoder decoder) const {
+                                  Decoder decoder,
+                                  const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
+    const int prompt_index = resolve_prompt_index(target_lang);
 
     // 1. Log-mel front end -> feats [n_mels, T]. On a non-CPU backend run the
     //    heavy STFT/power/filterbank/log on the backend (GPU) via GpuMel; on CPU
@@ -103,6 +132,11 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
     std::vector<float> enc_out;
     int d_model = 0, Tout = 0;
     encoder.forward(feats, n_mels, T, enc_out, d_model, Tout);
+
+    // 2b. Prompt conditioning (multilingual nemotron): project the encoder
+    //     output with the selected language one-hot before decoding. No-op for
+    //     other models (prompt.present == false).
+    maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
 
     // Decide which head to use.
     const bool use_tdt = (decoder == Decoder::kTDT)
@@ -162,8 +196,10 @@ static void batch_enc_to_row_major(const std::vector<std::vector<float>>& enc_ou
 }
 
 std::vector<std::string> Model::transcribe_16k_batch(
-    const std::vector<std::vector<float>>& pcms16k, Decoder decoder) const {
+    const std::vector<std::vector<float>>& pcms16k, Decoder decoder,
+    const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
+    const int prompt_index = resolve_prompt_index(target_lang);
     const bool use_tdt = (decoder == Decoder::kTDT)
         || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
 
@@ -175,6 +211,11 @@ std::vector<std::string> Model::transcribe_16k_batch(
     std::vector<std::vector<float>> enc_outs; int d_model = 0, Tout = 0;
     std::vector<int> valid_Tout;
     encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+
+    // 2b. Prompt conditioning per item (one language for the whole batch). No-op
+    //     for non-prompt models.
+    for (int b = 0; b < mb.B; ++b)
+        maybe_apply_prompt(loader_, enc_outs[b], d_model, valid_Tout[b], prompt_index);
 
     // 3. Decode (each enc_out is [d_model, valid_Tout[b]]).
     std::vector<std::string> outs(mb.B);
@@ -202,7 +243,7 @@ std::vector<std::string> Model::transcribe_16k_batch(
 
 std::vector<std::string> Model::transcribe_pcm_batch(
     const std::vector<std::vector<float>>& pcms, int sample_rate,
-    Decoder decoder) const {
+    Decoder decoder, const std::string& target_lang) const {
     if (sample_rate <= 0) {
         throw std::runtime_error("parakeet: invalid sample_rate");
     }
@@ -210,7 +251,7 @@ std::vector<std::string> Model::transcribe_pcm_batch(
     for (size_t i = 0; i < pcms.size(); ++i)
         r[i] = (sample_rate == 16000) ? pcms[i]
                                       : resample_linear(pcms[i], sample_rate, 16000);
-    return transcribe_16k_batch(r, decoder);
+    return transcribe_16k_batch(r, decoder, target_lang);
 }
 
 // Decode one item's encoder output (channels-first [d_model, Tout]) into a
@@ -260,8 +301,10 @@ static Transcription decode_enc_out_with_timestamps(
 }
 
 Transcription Model::transcribe_16k_with_timestamps(
-    const std::vector<float>& pcm16k, Decoder decoder) const {
+    const std::vector<float>& pcm16k, Decoder decoder,
+    const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
+    const int prompt_index = resolve_prompt_index(target_lang);
 
     // frame_sec = hop_length * subsampling_factor / sample_rate (= 0.08 s here).
     // This is NeMo's window_stride * subsampling_factor (window_stride =
@@ -288,6 +331,9 @@ Transcription Model::transcribe_16k_with_timestamps(
     int d_model = 0, Tout = 0;
     encoder.forward(feats, n_mels, T, enc_out, d_model, Tout);
 
+    // 2b. Prompt conditioning (nemotron): project before decode. No-op otherwise.
+    maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
+
     const bool use_tdt = (decoder == Decoder::kTDT)
         || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
 
@@ -297,8 +343,10 @@ Transcription Model::transcribe_16k_with_timestamps(
 }
 
 std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
-        const std::vector<std::vector<float>>& pcms16k, Decoder decoder) const {
+        const std::vector<std::vector<float>>& pcms16k, Decoder decoder,
+        const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
+    const int prompt_index = resolve_prompt_index(target_lang);
     const float frame_sec =
         (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
     const bool use_tdt = (decoder == Decoder::kTDT)
@@ -310,6 +358,11 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
     std::vector<std::vector<float>> enc_outs; int d_model = 0, Tout = 0;
     std::vector<int> valid_Tout;
     encoder.forward_batch(mb, enc_outs, d_model, Tout, valid_Tout);
+
+    // Prompt conditioning per item (one language for the whole batch). No-op
+    // for non-prompt models.
+    for (int b = 0; b < mb.B; ++b)
+        maybe_apply_prompt(loader_, enc_outs[b], d_model, valid_Tout[b], prompt_index);
 
     std::vector<Transcription> outs(mb.B);
     if (use_tdt) {
@@ -344,7 +397,7 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
 
 std::vector<Transcription> Model::transcribe_pcm_batch_with_timestamps(
         const std::vector<std::vector<float>>& pcms, int sample_rate,
-        Decoder decoder) const {
+        Decoder decoder, const std::string& target_lang) const {
     if (sample_rate <= 0) {
         throw std::runtime_error("parakeet: invalid sample_rate");
     }
@@ -352,50 +405,52 @@ std::vector<Transcription> Model::transcribe_pcm_batch_with_timestamps(
     for (size_t i = 0; i < pcms.size(); ++i)
         r[i] = (sample_rate == 16000) ? pcms[i]
                                       : resample_linear(pcms[i], sample_rate, 16000);
-    return transcribe_16k_batch_with_timestamps(r, decoder);
+    return transcribe_16k_batch_with_timestamps(r, decoder, target_lang);
 }
 
 std::string Model::transcribe_pcm(const std::vector<float>& pcm, int sample_rate,
-                                  Decoder decoder) const {
+                                  Decoder decoder, const std::string& target_lang) const {
     if (sample_rate <= 0) {
         throw std::runtime_error("parakeet: invalid sample_rate");
     }
     if (sample_rate == 16000) {
-        return transcribe_16k(pcm, decoder);
+        return transcribe_16k(pcm, decoder, target_lang);
     }
     std::vector<float> pcm16k = resample_linear(pcm, sample_rate, 16000);
-    return transcribe_16k(pcm16k, decoder);
+    return transcribe_16k(pcm16k, decoder, target_lang);
 }
 
 std::string Model::transcribe_path(const std::string& wav_path,
-                                   Decoder decoder) const {
+                                   Decoder decoder, const std::string& target_lang) const {
     Audio audio;
     if (!load_audio_16k_mono(wav_path, audio)) {
         throw std::runtime_error("parakeet: failed to load audio: " + wav_path);
     }
     // load_audio_16k_mono already resamples to 16 kHz mono.
-    return transcribe_16k(audio.samples, decoder);
+    return transcribe_16k(audio.samples, decoder, target_lang);
 }
 
 Transcription Model::transcribe_with_timestamps(
-    const std::vector<float>& pcm, int sample_rate, Decoder decoder) const {
+    const std::vector<float>& pcm, int sample_rate, Decoder decoder,
+    const std::string& target_lang) const {
     if (sample_rate <= 0) {
         throw std::runtime_error("parakeet: invalid sample_rate");
     }
     if (sample_rate == 16000) {
-        return transcribe_16k_with_timestamps(pcm, decoder);
+        return transcribe_16k_with_timestamps(pcm, decoder, target_lang);
     }
     std::vector<float> pcm16k = resample_linear(pcm, sample_rate, 16000);
-    return transcribe_16k_with_timestamps(pcm16k, decoder);
+    return transcribe_16k_with_timestamps(pcm16k, decoder, target_lang);
 }
 
 Transcription Model::transcribe_path_with_timestamps(
-    const std::string& wav_path, Decoder decoder) const {
+    const std::string& wav_path, Decoder decoder,
+    const std::string& target_lang) const {
     Audio audio;
     if (!load_audio_16k_mono(wav_path, audio)) {
         throw std::runtime_error("parakeet: failed to load audio: " + wav_path);
     }
-    return transcribe_16k_with_timestamps(audio.samples, decoder);
+    return transcribe_16k_with_timestamps(audio.samples, decoder, target_lang);
 }
 
 } // namespace pk
