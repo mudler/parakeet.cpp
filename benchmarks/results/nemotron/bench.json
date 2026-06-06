@@ -1,0 +1,40 @@
+{
+  "clip": "speech.wav",
+  "audio_sec": 7.435,
+  "lang": "en",
+  "threads": 8,
+  "passes": 7,
+  "nemo": {
+    "rtfx": 12.228159482130682,
+    "median_proc_s": 0.6080228190403432,
+    "text": "Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. <en-US> It is certainly very like the old portrait. <en-US>",
+    "version": "2.8.0rc0",
+    "load_s": 25.837787624972407
+  },
+  "ours": {
+    "f32": {
+      "rtfx": 29.353937020308894,
+      "speedup": 2.400519641831998,
+      "median_proc_s": 0.253288,
+      "agreement_wer": 0.0,
+      "text": "Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. <en-US> It is certainly very like the old portrait. <en-US>",
+      "load_ms": 547.68
+    },
+    "q8_0": {
+      "rtfx": 30.819419343071743,
+      "speedup": 2.5203645232227254,
+      "median_proc_s": 0.241244,
+      "agreement_wer": 0.0,
+      "text": "Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. <en-US> It is certainly very like the old portrait. <en-US>",
+      "load_ms": 247.568
+    }
+  },
+  "stream": {
+    "dtype": "f32",
+    "compute_rtfx": 3.801518370630737,
+    "wall_rtfx": 2.96986895150122,
+    "median_wall_s": 2.5034774669911712,
+    "compute_s": 1.9557974669911713,
+    "load_s": 0.54768
+  }
+}

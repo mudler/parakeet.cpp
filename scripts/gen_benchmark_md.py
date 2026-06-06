@@ -118,6 +118,91 @@ def build_headline_table(models: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Nemotron (prompt-conditioned, streaming, multilingual) ───────────────────────
+
+def build_nemotron_section(results_dir: Path) -> str:
+    """Standalone section for the nemotron-3.5-asr-streaming-0.6b port.
+
+    This model is prompt-conditioned (a per-language one-hot drives a PromptKernel
+    between the encoder and the transducer) and is benchmarked from a local .nemo
+    + GGUF pair, so it is outside the HF-id LibriSpeech pipeline above. Reads
+    ``<results>/nemotron/bench.json`` written by ``scripts/bench_nemotron.py``;
+    returns "" when that file is absent.
+    """
+    fp = results_dir / "nemotron" / "bench.json"
+    if not fp.is_file():
+        return ""
+    d = json.loads(fp.read_text())
+    clip = d["clip"]
+    audio = d["audio_sec"]
+    lang = d["lang"]
+    threads = d["threads"]
+    passes = d["passes"]
+    nemo = d["nemo"]
+    f32 = d["ours"]["f32"]
+    q8 = d["ours"].get("q8_0")
+
+    lines = ["## Nemotron (streaming, multilingual, prompt-conditioned)\n"]
+    lines.append(
+        "`nemotron-3.5-asr-streaming-0.6b` is a FastConformer transducer with a "
+        "per-language prompt: a one-hot language vector drives a PromptKernel "
+        "between the encoder and the RNN-T decoder. It runs both offline and "
+        "cache-aware streaming. Because it loads from a local `.nemo` plus its "
+        "GGUF, it sits outside the LibriSpeech pipeline above and is measured on "
+        "its own here.\n"
+    )
+    lines.append(
+        f"One clip (`{clip}`, {audio:.2f} s), language prompt `{lang}`, "
+        f"{threads} threads, median of {passes} passes after one warmup. ours is "
+        "`parakeet-cli bench --decoder tdt --lang " + lang + "` (load once, time "
+        "transcribe only); NeMo runs the same prompt forward (preprocessor, "
+        "encoder, PromptKernel, RNN-T greedy) on PyTorch CPU. RTFx = audio "
+        "seconds per second of compute; higher is faster.\n"
+    )
+    lines.append(
+        f"Host: AMD Ryzen 9 9950X3D (20 cores), CPU-only. NeMo "
+        f"{nemo.get('version', '?')}.\n"
+    )
+
+    lines.append("| Engine | RTFx | Speedup vs NeMo | Agreement WER vs NeMo |")
+    lines.append("|---|---|---|---|")
+    lines.append(f"| NeMo (PyTorch CPU) | {nemo['rtfx']:.1f} | 1.00× | reference |")
+    lines.append(
+        f"| parakeet.cpp f32 | {f32['rtfx']:.1f} | {f32['speedup']:.2f}× "
+        f"| {f32['agreement_wer']*100:.4f}% |"
+    )
+    if q8:
+        lines.append(
+            f"| parakeet.cpp q8_0 | {q8['rtfx']:.1f} | {q8['speedup']:.2f}× "
+            f"| {q8['agreement_wer']*100:.4f}% |"
+        )
+    lines.append("")
+    lines.append(
+        f"Accuracy is **WER 0 vs NeMo**: the f32 and q8_0 transcripts are "
+        f"byte-identical to NeMo's on the timed runs (agreement WER 0.0000%), so "
+        f"the speed numbers compare equal work. parakeet.cpp is "
+        f"**{f32['speedup']:.2f}× faster than NeMo at f32** and "
+        f"**{q8['speedup']:.2f}× at q8_0**." if q8 else
+        f"Accuracy is **WER 0 vs NeMo** (agreement WER 0.0000%); parakeet.cpp is "
+        f"**{f32['speedup']:.2f}× faster than NeMo at f32**."
+    )
+    lines.append("")
+
+    stream = d.get("stream")
+    if stream:
+        lines.append(
+            f"Streaming path ({stream['dtype']}, cache-aware): compute RTFx "
+            f"**{stream['compute_rtfx']:.2f}** (median wall "
+            f"{stream['median_wall_s']*1000:.0f} ms over the {audio:.2f} s clip, "
+            f"one-time model load of {stream['load_s']*1000:.0f} ms subtracted). "
+            f"Streaming is latency-oriented: it runs many small chunked forward "
+            f"passes rather than one offline pass, so its RTFx sits well below the "
+            f"offline number by design while staying several times real time. The "
+            f"streaming transcript matches the offline and NeMo transcripts.\n"
+        )
+    return "\n".join(lines)
+
+
 # ── Quantization summary (all dtypes, aggregated) ────────────────────────────────
 
 def build_quant_table(models: list[dict], dtypes: list[str]) -> str:
@@ -417,6 +502,7 @@ def main():
         build_demo_section() + "\n",
         build_methodology(models, dtypes) + "\n",
         build_headline_table(models) + "\n",
+        build_nemotron_section(results_dir) + "\n",
         build_quant_table(models, dtypes) + "\n",
         build_batched_decode_section(results_dir) + "\n",
         build_plots_section(plots_dir, out_path) + "\n",

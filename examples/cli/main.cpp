@@ -527,7 +527,7 @@ static std::vector<std::string> read_manifest(const std::string& path, bool& ok)
 }
 
 static int cmd_bench(int argc, char** argv) {
-    std::string model, manifest, decoder_str, json_out;
+    std::string model, manifest, decoder_str, json_out, lang;
     int threads = 0;  // 0 == unset -> use the components' built-in default
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -536,6 +536,8 @@ static int cmd_bench(int argc, char** argv) {
             manifest = argv[++i];
         } else if (std::strcmp(argv[i], "--decoder") == 0 && i + 1 < argc) {
             decoder_str = argv[++i];
+        } else if (std::strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+            lang = argv[++i];
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             threads = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
@@ -545,7 +547,7 @@ static int cmd_bench(int argc, char** argv) {
     if (model.empty() || manifest.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli bench --model <m.gguf> --manifest <file> "
-            "[--decoder ctc|tdt] [--threads N] [--json <out>]\n");
+            "[--decoder ctc|tdt] [--lang <locale>] [--threads N] [--json <out>]\n");
         return 2;
     }
 
@@ -613,7 +615,7 @@ static int cmd_bench(int argc, char** argv) {
     {
         pk::Audio warm;
         if (pk::load_audio_16k_mono(paths[0], warm)) {
-            (void)m->transcribe_pcm(warm.samples, 16000, dec);
+            (void)m->transcribe_pcm(warm.samples, 16000, dec, lang);
         }
     }
 
@@ -631,7 +633,7 @@ static int cmd_bench(int argc, char** argv) {
         auto t_proc = clock::now();
         std::string text;
         try {
-            text = m->transcribe_pcm(audio.samples, 16000, dec);
+            text = m->transcribe_pcm(audio.samples, 16000, dec, lang);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "parakeet-cli bench: transcribe failed on %s: %s\n",
                          p.c_str(), e.what());
@@ -1180,7 +1182,7 @@ int main(int argc, char** argv) {
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n"
         "  parakeet-cli bench --model <model.gguf> --manifest <file> "
-        "[--decoder ctc|tdt] [--threads N] [--json <out>]\n"
+        "[--decoder ctc|tdt] [--lang <locale>] [--threads N] [--json <out>]\n"
         "  parakeet-cli bench-batch --model <model.gguf> --manifest <file> "
         "[--decoder ctc|tdt] [--threads N] [--batch-sizes 1,4,8] [--json <out>]\n"
         "  parakeet-cli bench-decode --model <model.gguf> --audio <wav> "

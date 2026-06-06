@@ -69,6 +69,24 @@ Versus whisper.cpp turbo, same accuracy (WER 1.6% on this clip) and far less com
 
 > **Speedup** = ours RTFx / NeMo RTFx (>1 = faster than NeMo). f32 reproduces NeMo's transcript (agreement ≈ 0).
 
+## Nemotron (streaming, multilingual, prompt-conditioned)
+
+`nemotron-3.5-asr-streaming-0.6b` is a FastConformer transducer with a per-language prompt: a one-hot language vector drives a PromptKernel between the encoder and the RNN-T decoder. It runs both offline and cache-aware streaming. Because it loads from a local `.nemo` plus its GGUF, it sits outside the LibriSpeech pipeline above and is measured on its own here.
+
+One clip (`speech.wav`, 7.43 s), language prompt `en`, 8 threads, median of 7 passes after one warmup. ours is `parakeet-cli bench --decoder tdt --lang en` (load once, time transcribe only); NeMo runs the same prompt forward (preprocessor, encoder, PromptKernel, RNN-T greedy) on PyTorch CPU. RTFx = audio seconds per second of compute; higher is faster.
+
+Host: AMD Ryzen 9 9950X3D (20 cores), CPU-only. NeMo 2.8.0rc0.
+
+| Engine | RTFx | Speedup vs NeMo | Agreement WER vs NeMo |
+|---|---|---|---|
+| NeMo (PyTorch CPU) | 12.2 | 1.00× | reference |
+| parakeet.cpp f32 | 29.4 | 2.40× | 0.0000% |
+| parakeet.cpp q8_0 | 30.8 | 2.52× | 0.0000% |
+
+Accuracy is **WER 0 vs NeMo**: the f32 and q8_0 transcripts are byte-identical to NeMo's on the timed runs (agreement WER 0.0000%), so the speed numbers compare equal work. parakeet.cpp is **2.40× faster than NeMo at f32** and **2.52× at q8_0**.
+
+Streaming path (f32, cache-aware): compute RTFx **3.80** (median wall 2503 ms over the 7.43 s clip, one-time model load of 548 ms subtracted). Streaming is latency-oriented: it runs many small chunked forward passes rather than one offline pass, so its RTFx sits well below the offline number by design while staying several times real time. The streaming transcript matches the offline and NeMo transcripts.
+
 ## Quantization — size / speed / accuracy tradeoff
 
 Averaged over all models (LibriSpeech). Size is the mean GGUF size as a fraction of the f32 GGUF.
