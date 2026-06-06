@@ -53,16 +53,7 @@ std::unique_ptr<Model> Model::load(const std::string& gguf_path) {
 int Model::resolve_prompt_index(const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
     if (!cfg.prompt.present) return -1;
-    const std::string lang = target_lang.empty() ? cfg.prompt.default_lang : target_lang;
-    int idx = cfg.prompt.lang_to_index(lang);
-    if (idx < 0) {
-        std::string sample;
-        for (size_t i = 0; i < cfg.prompt.dict_keys.size() && i < 8; ++i)
-            sample += (i ? ", " : "") + cfg.prompt.dict_keys[i];
-        throw std::runtime_error("parakeet: unknown target_lang '" + lang +
-                                 "'. Valid examples: " + sample + ", ...");
-    }
-    return idx;
+    return cfg.prompt.resolve_index_or_throw(target_lang);
 }
 
 // Apply the prompt-conditioning projection in place on a channels-first encoder

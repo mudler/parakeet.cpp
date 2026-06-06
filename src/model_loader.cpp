@@ -8,7 +8,22 @@
 #include <cstring>
 #include <vector>
 #include <utility>
+#include <stdexcept>
 namespace pk {
+
+int PromptCfg::resolve_index_or_throw(const std::string& target_lang) const {
+    const std::string lang = target_lang.empty() ? default_lang : target_lang;
+    int idx = lang_to_index(lang);
+    if (idx < 0) {
+        std::string sample;
+        for (size_t i = 0; i < dict_keys.size() && i < 8; ++i)
+            sample += (i ? ", " : "") + dict_keys[i];
+        throw std::runtime_error("parakeet: unknown target_lang '" + lang +
+                                 "'. Valid examples: " + sample + ", ...");
+    }
+    return idx;
+}
+
 static uint32_t kv_u32(gguf_context* g, const char* k, uint32_t d=0){
     int64_t id = gguf_find_key(g,k); return id<0 ? d : (uint32_t)gguf_get_val_u32(g,id);
 }

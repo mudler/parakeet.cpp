@@ -38,6 +38,11 @@ struct PromptCfg {
             if (dict_keys[i] == lang) return (int)dict_vals[i];
         return -1;
     }
+    // Resolve target_lang to its prompt index, applying the model default for an
+    // empty string. THROWS std::runtime_error on an unknown locale. Shared by the
+    // offline (Model::resolve_prompt_index) and streaming (StreamingSession ctor)
+    // paths so both reject typos identically (matches the C-API contract).
+    int resolve_index_or_throw(const std::string& target_lang) const;
 };
 struct ParakeetConfig {
     std::string arch;

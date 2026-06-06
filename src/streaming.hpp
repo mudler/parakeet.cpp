@@ -56,7 +56,9 @@ public:
     // `target_lang` selects the language prompt for multilingual (nemotron)
     // prompt-conditioned models (e.g. "en", "de", "auto"); empty -> the model's
     // default_lang. It is ignored by non-prompt models (prompt_.present()==false).
-    // An unknown locale falls back to the model default_lang index.
+    // For a prompt model an unknown locale THROWS std::runtime_error (matching the
+    // offline Model::resolve_prompt_index and the C-API stream_begin_lang
+    // contract), so a typo fails loudly rather than silently mis-transcribing.
     explicit StreamingSession(const ModelLoader& ml, const std::string& target_lang = "");
 
     // Reset the encoder caches AND the decoder state to a fresh stream.

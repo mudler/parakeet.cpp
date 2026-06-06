@@ -17,11 +17,12 @@ StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& tar
     // projection is applied per chunk in feed_mel_chunk using this fixed index.
     // Non-prompt models leave prompt_index_ = -1 and skip prompt_.apply().
     if (cfg.prompt.present) {
-        const PromptCfg& pc = cfg.prompt;
-        std::string lang = target_lang.empty() ? pc.default_lang : target_lang;
-        prompt_index_ = pc.lang_to_index(lang);
-        if (prompt_index_ < 0)
-            prompt_index_ = pc.lang_to_index(pc.default_lang);  // fall back to default
+        // Empty target_lang -> the model default; an unknown locale THROWS
+        // std::runtime_error (same message as Model::resolve_prompt_index), so a
+        // typo (e.g. --lang xx) fails loudly instead of silently mis-transcribing.
+        // Matches the offline path and the parakeet_capi_stream_begin_lang
+        // contract (NULL + ctx last_error on an unknown locale).
+        prompt_index_ = cfg.prompt.resolve_index_or_throw(target_lang);
     }
     // Greedy max symbols per frame, from model metadata (NeMo default 10);
     // matches the offline pk::transcribe path in model.cpp.

@@ -117,6 +117,37 @@ int main() {
         }
         std::fprintf(stderr, "test_capi: nemotron unknown-lang error = %s\n", err);
 
+        // Streaming path must reject an unknown locale exactly like the offline
+        // path: NULL + non-empty last_error (no silent fallback to the default).
+        parakeet_stream* bad_stream = parakeet_capi_stream_begin_lang(nctx, "zzz");
+        if (bad_stream != nullptr) {
+            std::fprintf(stderr,
+                "test_capi: stream_begin_lang(zzz) returned non-NULL\n");
+            parakeet_capi_stream_free(bad_stream);
+            parakeet_capi_free(nctx);
+            return 1;
+        }
+        const char* serr = parakeet_capi_last_error(nctx);
+        if (!serr || serr[0] == '\0') {
+            std::fprintf(stderr,
+                "test_capi: stream unknown-lang did not set last_error\n");
+            parakeet_capi_free(nctx);
+            return 1;
+        }
+        std::fprintf(stderr, "test_capi: nemotron stream unknown-lang error = %s\n",
+                     serr);
+
+        // A known language prompt must begin a stream (non-NULL); free it.
+        parakeet_stream* ok_stream = parakeet_capi_stream_begin_lang(nctx, "en");
+        if (!ok_stream) {
+            std::fprintf(stderr,
+                "test_capi: stream_begin_lang(en) returned NULL: %s\n",
+                parakeet_capi_last_error(nctx));
+            parakeet_capi_free(nctx);
+            return 1;
+        }
+        parakeet_capi_stream_free(ok_stream);
+
         parakeet_capi_free(nctx);
         std::fprintf(stderr, "test_capi: PASS nemotron target_lang variants\n");
     } else {
