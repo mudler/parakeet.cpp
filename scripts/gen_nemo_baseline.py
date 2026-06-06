@@ -235,30 +235,17 @@ def _prompt_streaming_text(m, feats, feat_len, pidx, num_prompts, specials):
     return stream_text, stream_ids
 
 
-def dump_prompt_baseline(m, args):
-    """Dump the prompt-model baseline for a fixed target_lang:
+def resolve_prompt_lang(m, lang=None):
+    """Resolve (target_lang, prompt_index, num_prompts) for a prompt model.
 
-      * ``encoder_out``       ``[D, T]``  RAW encoder output (BEFORE prompt).
-      * ``prompt_kernel_out`` ``[T, D]``  prompt_kernel(cat([encoded, onehot])),
-                                          i.e. NeMo's forward() prompt branch.
-      * ``rnnt_token_ids``    ``[L]`` int32  NeMo RNNT greedy ids for this lang.
-      * KVs: baseline.target_lang, baseline.prompt_index,
-             baseline.rnnt_token_count, baseline.rnnt_text,
-             baseline.stream_text (cache-aware streaming transcript WITH prompt,
-             EOU/EOB stripped — the authoritative target for StreamingSession).
-
-    Mirrors NeMo EncDecRNNTBPEModelWithPrompt.forward():
-      encoded(B,D,T) -> transpose -> cat(onehot) -> prompt_kernel -> transpose.
-    The one-hot is constant over time (one language per utterance).
+    ``lang`` None/empty -> the model default ("auto" if present, else the first
+    dictionary key). Exits(1) with PARAKEET_BASELINE_BAD_LANG on an unknown key.
     """
-    import torch
-    import soundfile as sf
-
     md = m.cfg.model_defaults
     pdict = md.prompt_dictionary
     num_prompts = int(md.get("num_prompts", 128))
     default_lang = "auto" if "auto" in pdict else list(pdict.keys())[0]
-    target_lang = args.lang or default_lang
+    target_lang = lang or default_lang
     if target_lang not in pdict:
         keys = list(pdict.keys())
         print(
@@ -267,9 +254,30 @@ def dump_prompt_baseline(m, args):
             file=sys.stderr,
         )
         sys.exit(1)
-    pidx = int(pdict[target_lang])
+    return target_lang, int(pdict[target_lang]), num_prompts
 
-    wav, sr = sf.read(args.audio, dtype="float32", always_2d=False)
+
+def compute_prompt_reference(m, audio_path, lang=None):
+    """NeMo reference for a prompt-conditioned (nemotron) model at target ``lang``.
+
+    Runs the SAME prompt branch as NeMo's forward() (encoder -> transpose ->
+    cat(onehot) -> prompt_kernel -> transpose) and decodes the prompt-conditioned
+    encoder output via ``m.decoding.rnnt_decoder_predictions_tensor`` for BOTH the
+    offline encoder pass and the cache-aware streaming pass. This is the
+    authoritative path used by every Phase 2/3 baseline (the lhotse
+    transcribe(target_lang=...) dataloader needs per-cut language metadata our bare
+    wav fixtures lack).
+
+    Returns a dict with: target_lang, prompt_index, num_prompts, encoder_out
+    (np [D,T]), prompt_kernel_out (np [T,D]), rnnt_ids (np int32), rnnt_text,
+    stream_text (str|None), stream_ids (list[int]|None).
+    """
+    import torch
+    import soundfile as sf
+
+    target_lang, pidx, num_prompts = resolve_prompt_lang(m, lang)
+
+    wav, sr = sf.read(audio_path, dtype="float32", always_2d=False)
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
     if sr != 16000:
@@ -322,17 +330,55 @@ def dump_prompt_baseline(m, args):
 
     # Cache-aware STREAMING transcript WITH the language prompt — the authoritative
     # target for the C++ StreamingSession. None if the model isn't a streaming
-    # (cache-aware) encoder, in which case the KV is omitted.
+    # (cache-aware) encoder.
     stream_text, stream_ids = _prompt_streaming_text(
         m, feats, flen, pidx, num_prompts, specials
     )
+
+    return {
+        "target_lang": target_lang,
+        "prompt_index": pidx,
+        "num_prompts": num_prompts,
+        "encoder_out": _squeeze(enc.cpu().float().numpy()),          # [D, T]
+        "prompt_kernel_out": _squeeze(pk_out.cpu().float().numpy()),  # [T, D]
+        "rnnt_ids": rnnt_ids,
+        "rnnt_text": rnnt_text,
+        "stream_text": stream_text,
+        "stream_ids": stream_ids,
+    }
+
+
+def dump_prompt_baseline(m, args):
+    """Dump the prompt-model baseline for a fixed target_lang:
+
+      * ``encoder_out``       ``[D, T]``  RAW encoder output (BEFORE prompt).
+      * ``prompt_kernel_out`` ``[T, D]``  prompt_kernel(cat([encoded, onehot])),
+                                          i.e. NeMo's forward() prompt branch.
+      * ``rnnt_token_ids``    ``[L]`` int32  NeMo RNNT greedy ids for this lang.
+      * KVs: baseline.target_lang, baseline.prompt_index,
+             baseline.rnnt_token_count, baseline.rnnt_text,
+             baseline.stream_text (cache-aware streaming transcript WITH prompt,
+             EOU/EOB stripped — the authoritative target for StreamingSession).
+
+    Mirrors NeMo EncDecRNNTBPEModelWithPrompt.forward():
+      encoded(B,D,T) -> transpose -> cat(onehot) -> prompt_kernel -> transpose.
+    The one-hot is constant over time (one language per utterance).
+    """
+    ref = compute_prompt_reference(m, args.audio, args.lang)
+    target_lang = ref["target_lang"]
+    pidx = ref["prompt_index"]
+    num_prompts = ref["num_prompts"]
+    rnnt_ids = ref["rnnt_ids"]
+    rnnt_text = ref["rnnt_text"]
+    stream_text = ref["stream_text"]
+    stream_ids = ref["stream_ids"]
 
     w = gguf.GGUFWriter(args.output, "parakeet-baseline-prompt")
     w.add_string("baseline.target_lang", target_lang)
     w.add_uint32("baseline.prompt_index", pidx)
     w.add_uint32("baseline.num_prompts", num_prompts)
-    w.add_tensor("encoder_out", _squeeze(enc.cpu().float().numpy()))           # [D, T]
-    w.add_tensor("prompt_kernel_out", _squeeze(pk_out.cpu().float().numpy()))  # [T, D]
+    w.add_tensor("encoder_out", ref["encoder_out"])           # [D, T]
+    w.add_tensor("prompt_kernel_out", ref["prompt_kernel_out"])  # [T, D]
     w.add_uint32("baseline.rnnt_token_count", int(rnnt_ids.shape[0]))
     if rnnt_ids.shape[0] > 0:
         w.add_tensor("rnnt_token_ids", np.ascontiguousarray(rnnt_ids))
