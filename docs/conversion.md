@@ -35,6 +35,16 @@ offline checkpoints omit them entirely (so they keep converting byte-identically
 and the C++ loader falls back to offline-safe defaults (`att_context [-1,-1]`,
 style `regular`, causal flags `false`, no streaming block).
 
+The `parakeet.prompt.*` keys and `parakeet.encoder.use_bias` /
+`parakeet.encoder.att_context_presets` are emitted **only for the
+prompt-conditioned multilingual model** `nvidia/nemotron-3.5-asr-streaming-0.6b`
+(`model_defaults.initialize_prompt_feature == true`). Every other checkpoint omits
+them and the loader defaults `prompt.present=false` (the prompt stage is skipped)
+and `use_bias=true`. nemotron stores `att_context_size` as a **list of presets**
+(`[[56,3],[56,0],[56,6],[56,13]]`, the first is the default 320 ms preset) rather
+than a single `[left,right]`, so the converter records all of them in
+`att_context_presets` and uses the first pair for the scalar left/right keys.
+
 | Key | GGUF type | Meaning | Source | 110m value |
 | --- | --- | --- | --- | --- |
 | `parakeet.arch` | STRING | One of `ctc` / `rnnt` / `tdt` / `hybrid_rnnt_ctc` / `hybrid_tdt_ctc` | arch detection (below) | `hybrid_tdt_ctc` |
@@ -61,6 +71,13 @@ style `regular`, causal flags `false`, no streaming block).
 | `parakeet.streaming.valid_out_len` | INT32 | Valid encoder frames per step. **Streaming only.** | `encoder.streaming_cfg.valid_out_len` | (n/a) |
 | `parakeet.streaming.pre_encode_cache_size` | ARRAY\<INT32\> | Pre-encode (mel) cache frames `[first, rest]`. **Streaming only.** | `encoder.streaming_cfg.pre_encode_cache_size` | (n/a) |
 | `parakeet.streaming.drop_extra_pre_encoded` | INT32 | Steps dropped after pre-encode. **Streaming only.** | `encoder.streaming_cfg.drop_extra_pre_encoded` | (n/a) |
+| `parakeet.encoder.use_bias` | BOOL | Whether the encoder linear layers carry a bias. `false` for nemotron (`use_bias=false`); the loader reads biases optionally and tolerates their absence. Defaults `true`. | `cfg.encoder.use_bias` | `true` |
+| `parakeet.encoder.att_context_presets` | ARRAY\<INT32\> | Flattened `[l,r,l,r,...]` list of all `att_context_size` presets when the model stores a **list** of `[left,right]` pairs (multi-latency streaming, e.g. nemotron `[[56,3],[56,0],[56,6],[56,13]]`). The first pair is the default and is also written to `att_context_left`/`att_context_right`. **Streaming, multi-context only.** | `cfg.encoder.att_context_size` | (n/a) |
+| `parakeet.prompt.present` | BOOL | Marks a prompt-conditioned multilingual model (nemotron). When `true` the C++ engine inserts the `prompt_kernel` (Linear, ReLU, Linear) on the encoder output, selected by a per-utterance language one-hot. Absent/`false` for every other model (which skip the stage entirely). | `model_defaults.initialize_prompt_feature` | (n/a) |
+| `parakeet.prompt.num_prompts` | UINT32 | Width of the language one-hot appended to the encoder output (`prompt_kernel.0` input = `d_model + num_prompts`). **Prompt only.** | `model_defaults.num_prompts` | 128 |
+| `parakeet.prompt.default_lang` | STRING | Locale used when no `--lang`/`target_lang` is given (nemotron: `auto`, prompt index 101). **Prompt only.** | derived (`auto` if present) | `auto` |
+| `parakeet.prompt.dictionary.keys` | ARRAY\<STRING\> | Locale strings (e.g. `en`, `en-US`, `de`, `es`, `ja-JP`, `auto`) parallel to `dictionary.values`. The loader resolves a `target_lang` to its prompt index by lookup. **Prompt only.** | `model_defaults.prompt_dictionary` keys | len 121 |
+| `parakeet.prompt.dictionary.values` | ARRAY\<INT32\> | Prompt index for each parallel key (multiple locales may share an index, e.g. `en` and `en-US` both map to 0). **Prompt only.** | `model_defaults.prompt_dictionary` values | (n/a) |
 | `parakeet.preprocessor.sample_rate` | UINT32 | Audio sample rate | `featurizer.sample_rate` | 16000 |
 | `parakeet.preprocessor.n_mels` | UINT32 | Mel filterbank count | `featurizer.nfilt` | 80 |
 | `parakeet.preprocessor.n_fft` | UINT32 | FFT size | `featurizer.n_fft` | 512 |
@@ -122,6 +139,13 @@ State-dict prefixes present in the hybrid anchor (690 tensors total):
 | CTC head (hybrid aux CTC) | `ctc_decoder.decoder_layers.0.*` | `ctc_decoder.decoder_layers.0.weight` shape `(vocab+1, d_model, 1)` |
 | Prediction net (LSTM) | `decoder.prediction.*` | `decoder.prediction.embed.weight`, `decoder.prediction.dec_rnn.lstm.weight_ih_l0` |
 | Joint net | `joint.{enc,pred,joint_net}.*` | `joint.joint_net.2.weight` shape `(vocab+1+D, joint_hidden)` |
+| Prompt kernel (nemotron only) | `prompt_kernel.{0,2}.*` | `prompt_kernel.0.weight` `(2048, d_model+num_prompts)`, `prompt_kernel.0.bias` `(2048,)`, `prompt_kernel.2.weight` `(d_model, 2048)`, `prompt_kernel.2.bias` `(d_model,)` |
+
+> The `prompt_kernel.*` projection weights are written verbatim by the generic
+> tensor loop (no special handling); only the `parakeet.prompt.*` KV metadata is
+> added by the converter. Like the LSTM prediction net and the featurizer buffers,
+> the prompt kernel is **not** on the quantization allowlist, so it stays F32 in
+> every quantized variant.
 
 > Pure-CTC checkpoints (`EncDecCTCModelBPE`) put the CTC head under `decoder.*`
 > instead of `ctc_decoder.*`; the verbatim rule preserves whatever the checkpoint

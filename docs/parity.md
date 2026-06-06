@@ -30,6 +30,7 @@ CPU, batch 1, deterministic greedy (NeMo 2.7.3).
 | `parakeet-rnnt-0.6b` | RNNT | `rnnt` | 1024 / 24 | 80 | **true** | 1024 | RNNT | **0.0** | PASS |
 | `parakeet-rnnt-1.1b` | RNNT | `rnnt` | 1024 / 42 | 80 | **true** | 1024 | RNNT | **0.0** | PASS |
 | `parakeet_realtime_eou_120m-v1` | Streaming + EOU | `rnnt` | 512 / 17 | 128 | false | 1026 | RNNT (offline, limited-context) | **0.0** | PASS (Phase 5 — 5a milestone) |
+| `nemotron-3.5-asr-streaming-0.6b` | Streaming, multilingual, prompt-conditioned | `rnnt` | 1024 / 24 | 128 | false | 13087 | RNNT offline + cache-aware streaming, per language | **0.0** | PASS (offline + streaming, langs en/de/es/ja-JP/auto) |
 
 Notes:
 - `xscaling` = NeMo FastConformer `xscale=sqrt(d_model)` (true) vs `xscale=None` (false).
@@ -53,6 +54,19 @@ Notes:
   clip NeMo's streaming does NOT emit `<EOU>` (the final-chunk tail has incomplete
   right context); the C++ streaming session/C-API/CLI match that exactly and do
   not fabricate one. See "Phase 5 — Streaming + EOU" below.
+- `nemotron-3.5-asr-streaming-0.6b` (multilingual, prompt-conditioned): a target
+  language one-hot (`--lang <locale>`, default `auto`) is projected through the
+  `prompt_kernel` (Linear, ReLU, Linear) on the encoder output before the RNNT
+  decode, both offline and per streaming chunk (the one-hot is constant over time,
+  so per-chunk application is exact). The authoritative NeMo reference decodes the
+  prompt-conditioned encoder output via `m.decoding.rnnt_decoder_predictions_tensor`
+  (the lhotse `transcribe(target_lang=...)` path needs per-cut language metadata our
+  bare wav fixtures lack). `scripts/e2e_nemo_compare.py` cross-checks the C++ CLI
+  against this reference for `tests/fixtures/{speech,clip}.wav` × `{en, de, es,
+  ja-JP, auto}` × `{offline, stream}`: **all 20 rows WER 0.0**. The `prompt_kernel`,
+  LSTM prediction net, and featurizer tensors stay F32 in every quantized variant
+  (f16 and q8_0 also verified WER 0.0; see `docs/quantization.md`). Note `ja` is not
+  a dictionary key — the Japanese locale is `ja-JP`.
 
 ---
 
