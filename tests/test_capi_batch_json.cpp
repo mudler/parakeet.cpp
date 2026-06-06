@@ -65,19 +65,39 @@ int main() {
     }
 
     // Prompt (multilingual / nemotron) model: exercise the batched target_lang
-    // variant's error handling. NOTE: this fixture is a CAUSAL streaming prompt
-    // model (causal_downsampling=True), and batched causal subsampling is not
-    // supported (subsampling.cpp asserts on B>1), so a valid-language 2-clip
-    // batch is intentionally NOT driven here — it would abort inside the encoder
-    // graph, not raise a catchable exception. We assert the catchable path: an
-    // unknown locale is rejected by resolve_prompt_index (which runs before the
-    // encoder) -> NULL + non-empty last_error, proving target_lang is threaded
-    // through the batched C-API. Skipped cleanly when the env var is unset.
+    // variant. This fixture is a CAUSAL streaming prompt model
+    // (causal_downsampling=True). Batched causal subsampling is now supported
+    // (byte-identical to per-item), so a valid-language 2-clip batch runs through
+    // the batched encoder and returns a JSON array of length 2. We also assert
+    // the catchable error path: an unknown locale is rejected by
+    // resolve_prompt_index (which runs before the encoder) -> NULL + non-empty
+    // last_error, proving target_lang is threaded through the batched C-API.
+    // Skipped cleanly when the env var is unset.
     const char* nemotron = std::getenv("PARAKEET_TEST_GGUF_NEMOTRON");
     if (nemotron) {
         ran_any = true;
         parakeet_ctx* nctx = parakeet_capi_load(nemotron);
         if (!nctx) { std::fprintf(stderr, "nemotron load failed\n"); return 1; }
+
+        // A valid locale ("de") must return a non-NULL JSON array of length 2.
+        char* ngood = parakeet_capi_transcribe_pcm_batch_json_lang(
+            nctx, concat.data(), n_samples, 2, 16000, 0, "de");
+        if (!ngood) {
+            std::fprintf(stderr, "nemotron batch_json_lang(de) returned NULL: %s\n",
+                         parakeet_capi_last_error(nctx));
+            parakeet_capi_free(nctx);
+            return 1;
+        }
+        std::string ndoc(ngood);
+        parakeet_capi_free_string(ngood);
+        bool nis_array = !ndoc.empty() && ndoc.front() == '[' && ndoc.back() == ']';
+        // Two JSON objects in the array (one per clip).
+        size_t nobj = 0, npos = 0;
+        while ((npos = ndoc.find("\"text\":", npos)) != std::string::npos) { ++nobj; npos += 7; }
+        bool ngood_ok = nis_array && nobj == 2;
+        std::fprintf(stderr, "nemotron batch_json_lang(de) array=%d objects=%zu -> %s\n",
+                     nis_array, nobj, ngood_ok ? "OK" : "FAIL");
+        if (!ngood_ok) { parakeet_capi_free(nctx); return 1; }
 
         // An unknown locale must fail cleanly: NULL + non-empty last_error.
         char* nbad = parakeet_capi_transcribe_pcm_batch_json_lang(

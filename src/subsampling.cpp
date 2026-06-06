@@ -54,10 +54,12 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
     const int F = n_mels;            // feature dim (80)
     const ModelLoader& ml = ml_;
 
-    // This task targets the NON-causal (offline) model only. Batched causal
-    // subsampling (per-stage time masking with a batch axis) is out of scope:
-    // the causal branch below still operates on the single-item assumption.
-    GGML_ASSERT(!(causal_ && B > 1) && "batched causal subsampling not supported");
+    // Batched causal subsampling IS supported: the causal branch below applies
+    // the leading ggml_pad_ext (lp1=2/rp1=1 on time) uniformly across the batch,
+    // and the per-item trailing-pad time masking (mask_time on the batch axis)
+    // plus the all_paddings=3 valid-length recurrence reproduce, per item, the
+    // exact standalone causal boundary. A clip in a B>1 batch is byte-identical
+    // to the same clip transcribed standalone (see test_subsampling_batch_causal).
 
     // --- Input (host-side): ggml conv data layout is [W=feat, H=T, IC=1, N=B].
     // NeMo conv input is [B,1,T,feat] (H=T, W=feat). We must feed

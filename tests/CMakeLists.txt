@@ -14,6 +14,7 @@ pk_add_test(test_mel)
 pk_add_test(test_mel_gpu)
 pk_add_test(test_subsampling)
 pk_add_test(test_subsampling_batch)
+pk_add_test(test_subsampling_batch_causal)
 pk_add_test(test_relpos_attention)
 pk_add_test(test_relpos_attention_local)
 pk_add_test(test_relpos_attention_local_chunked)
@@ -58,7 +59,7 @@ pk_add_test(test_capi_batch)
 pk_add_test(test_capi_stream)
 pk_add_test(test_capi_timestamps)
 pk_add_test(test_capi_batch_json)
-set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling test_subsampling_batch test_relpos_attention test_relpos_attention_batch test_relpos_attention_local_chunked
+set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling test_subsampling_batch test_subsampling_batch_causal test_relpos_attention test_relpos_attention_batch test_relpos_attention_local_chunked
                      test_conformer test_conformer_batch test_conv_eou test_encoder test_encoder_batch test_encoder_batch_local test_encoder_eou
                      test_streaming_encoder test_ctc test_prediction
                      test_prediction_step test_prediction_step_batch
@@ -71,7 +72,7 @@ set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling te
                      test_capi_timestamps test_capi_batch_json
                      PROPERTIES LABELS "model")
 # These tests read fixtures/baselines via paths relative to the project root.
-set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_batch test_relpos_attention test_relpos_attention_batch test_conformer test_conformer_batch
+set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_batch test_subsampling_batch_causal test_relpos_attention test_relpos_attention_batch test_conformer test_conformer_batch
                      test_conv_eou test_encoder test_encoder_batch test_encoder_batch_local test_encoder_eou test_streaming_encoder
                      test_ctc test_prediction test_prediction_step test_prediction_step_batch
                      test_joint test_joint_step_batch test_prompt_kernel
