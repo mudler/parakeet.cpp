@@ -4,6 +4,7 @@
 #include "prediction.hpp"
 #include "joint.hpp"
 #include "rnnt.hpp"
+#include "prompt_kernel.hpp"
 #include "decode_types.hpp"
 #include "transcription.hpp"
 #include <functional>
@@ -52,7 +53,11 @@ struct EouEvent {
 // already including pre-encode-cache overlap, matching test_streaming_encoder).
 class StreamingSession {
 public:
-    explicit StreamingSession(const ModelLoader& ml);
+    // `target_lang` selects the language prompt for multilingual (nemotron)
+    // prompt-conditioned models (e.g. "en", "de", "auto"); empty -> the model's
+    // default_lang. It is ignored by non-prompt models (prompt_.present()==false).
+    // An unknown locale falls back to the model default_lang index.
+    explicit StreamingSession(const ModelLoader& ml, const std::string& target_lang = "");
 
     // Reset the encoder caches AND the decoder state to a fresh stream.
     void reset();
@@ -126,6 +131,8 @@ private:
     StreamingEncoder enc_;
     PredictionNet pred_;
     Joint joint_;
+    PromptKernel prompt_;          // post-encoder language conditioning (nemotron)
+    int prompt_index_ = -1;        // resolved language prompt index (-1 if absent)
     int d_model_;
     int blank_id_;
     int max_symbols_;
@@ -183,12 +190,17 @@ private:
 // it processes the supplied clip in one pass (the encoder/decoder are still
 // driven chunk-by-chunk with carried state — the streaming numerics, not a
 // real-time PCM feeder).
+// `target_lang` is currently unused by the driver itself (the session already
+// owns its resolved prompt index from construction); it is accepted so callers
+// (C-API/CLI, Phase 4) can pass a language through one entry point. Defaults to
+// "" (the session's configured language).
 void run_stream_over_pcm(
     StreamingSession& sess, const ModelLoader& ml,
     const std::vector<float>& pcm16k,
     const std::function<void(const std::string& new_text,
                              const std::vector<EouEvent>& chunk_events,
                              const std::vector<Word>& chunk_words)>& on_chunk
-        = nullptr);
+        = nullptr,
+    const std::string& target_lang = "");
 
 } // namespace pk

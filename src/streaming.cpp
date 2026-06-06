@@ -6,11 +6,23 @@
 
 namespace pk {
 
-StreamingSession::StreamingSession(const ModelLoader& ml)
-    : ml_(ml), enc_(ml), pred_(ml), joint_(ml) {
+StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& target_lang)
+    : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml) {
     const ParakeetConfig& cfg = ml.config();
     d_model_  = (int)cfg.d_model;
     blank_id_ = (int)cfg.blank_id;
+
+    // Resolve the language prompt index for multilingual (nemotron) models. The
+    // one-hot is constant over time (one language per utterance), so the prompt
+    // projection is applied per chunk in feed_mel_chunk using this fixed index.
+    // Non-prompt models leave prompt_index_ = -1 and skip prompt_.apply().
+    if (cfg.prompt.present) {
+        const PromptCfg& pc = cfg.prompt;
+        std::string lang = target_lang.empty() ? pc.default_lang : target_lang;
+        prompt_index_ = pc.lang_to_index(lang);
+        if (prompt_index_ < 0)
+            prompt_index_ = pc.lang_to_index(pc.default_lang);  // fall back to default
+    }
     // Greedy max symbols per frame, from model metadata (NeMo default 10);
     // matches the offline pk::transcribe path in model.cpp.
     max_symbols_ = (int)cfg.max_symbols;
@@ -88,6 +100,26 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     if (n_valid <= 0) {
         last_chunk_had_eou_ = false;
         return {};
+    }
+
+    // 1b. Prompt conditioning (nemotron multilingual): project the chunk's
+    //     encoder frames through prompt_kernel for the resolved language before
+    //     the RNN-T decode. The one-hot is constant over time, so applying it
+    //     per chunk is exact (== the offline forward's single application).
+    //     prompt_.apply() wants channels-first [d_model, valid]; enc_.step gives
+    //     time-major [valid, d_model], so transpose in, apply, transpose back.
+    //     No-op for non-prompt models (prompt_.present()==false): enc_frames is
+    //     left byte-identical.
+    if (prompt_.present()) {
+        std::vector<float> chunk_cf((size_t)d_model_ * n_valid);  // [d_model, valid]
+        for (int t = 0; t < n_valid; ++t)
+            for (int c = 0; c < d_model_; ++c)
+                chunk_cf[(size_t)c * n_valid + t] = enc_frames[(size_t)t * d_model_ + c];
+        std::vector<float> projected;
+        prompt_.apply(chunk_cf, d_model_, n_valid, prompt_index_, projected);  // [d_model, valid]
+        for (int t = 0; t < n_valid; ++t)
+            for (int c = 0; c < d_model_; ++c)
+                enc_frames[(size_t)t * d_model_ + c] = projected[(size_t)c * n_valid + t];
     }
 
     // 2. RNN-T greedy over the new encoder frames, carrying the decoder state
@@ -188,7 +220,12 @@ void run_stream_over_pcm(
     const std::vector<float>& pcm16k,
     const std::function<void(const std::string&,
                              const std::vector<EouEvent>&,
-                             const std::vector<Word>&)>& on_chunk) {
+                             const std::vector<Word>&)>& on_chunk,
+    const std::string& target_lang) {
+    // target_lang is intentionally unused here: the session already carries its
+    // resolved prompt index from construction. The parameter exists so callers
+    // can route a language through a single entry point (Phase 4 C-API/CLI).
+    (void)target_lang;
     // 1. Full-clip mel [n_mels, T] (feat-major inner=T), matching the offline /
     //    NeMo online_normalization=False reference (normalization over the whole
     //    clip). The streaming numerics come from the carried encoder/decoder
