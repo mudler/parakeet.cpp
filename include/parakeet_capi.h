@@ -17,6 +17,11 @@ typedef struct parakeet_ctx parakeet_ctx;
 
 // ABI version of this header/implementation. Bump on any breaking change to the
 // function signatures or semantics below.
+//
+// v3: added the target_lang variants (parakeet_capi_transcribe_path_lang,
+//     parakeet_capi_transcribe_pcm_lang, parakeet_capi_stream_begin_lang) for
+//     multilingual prompt-conditioned (nemotron) models. The original non-lang
+//     entry points are unchanged and delegate with the model default language.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -43,6 +48,21 @@ char* parakeet_capi_transcribe_path(parakeet_ctx* ctx, const char* wav_path,
 // returns NULL and sets the context's last error.
 char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* samples,
                                    int n_samples, int sample_rate, int decoder);
+
+// Like parakeet_capi_transcribe_path but selects the language prompt for
+// multilingual (nemotron) models. `target_lang` is a locale string (e.g. "en",
+// "de", "auto"); NULL or "" uses the model's default ("auto"). Ignored by
+// non-prompt models. On an unknown locale (for a prompt model) returns NULL and
+// sets the context's last error. parakeet_capi_transcribe_path delegates here
+// with the model default.
+char* parakeet_capi_transcribe_path_lang(parakeet_ctx* ctx, const char* wav_path,
+                                         int decoder, const char* target_lang);
+
+// Like parakeet_capi_transcribe_pcm but selects the language prompt (see
+// parakeet_capi_transcribe_path_lang for `target_lang` semantics).
+char* parakeet_capi_transcribe_pcm_lang(parakeet_ctx* ctx, const float* samples,
+                                        int n_samples, int sample_rate, int decoder,
+                                        const char* target_lang);
 
 // Transcribe a batch of in-memory mono float PCM clips. `samples` is an array of
 // `n_clips` pointers and `n_samples` an array of `n_clips` per-clip lengths; each
@@ -106,6 +126,15 @@ typedef struct parakeet_stream parakeet_stream;
 // Begin a streaming session over `ctx`'s model. Returns NULL on failure (e.g.
 // the model is not a cache-aware streaming model) and sets the ctx last error.
 parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
+
+// Begin a streaming session selecting the language prompt for multilingual
+// (nemotron) prompt-conditioned models. `target_lang` is a locale string (e.g.
+// "en", "de", "auto"); NULL or "" uses the model's default. Ignored by
+// non-prompt models. Returns NULL on failure (not a streaming model, or an
+// unknown locale) and sets the ctx last error. parakeet_capi_stream_begin
+// delegates here with the model default.
+parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
+                                                 const char* target_lang);
 
 // Feed a block of 16 kHz MONO float PCM (`pcm`, length `n_samples`). The session
 // buffers the audio and decodes as full encoder chunks become available.

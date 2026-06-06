@@ -16,7 +16,9 @@
 #include <vector>
 
 // ABI version. Bump on breaking changes.
-#define PARAKEET_CAPI_ABI_VERSION 2
+// v3: target_lang variants (transcribe_path_lang / transcribe_pcm_lang /
+//     stream_begin_lang) for multilingual prompt-conditioned (nemotron) models.
+#define PARAKEET_CAPI_ABI_VERSION 3
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -204,13 +206,47 @@ extern "C" void parakeet_capi_free(parakeet_ctx* ctx) {
     delete ctx;  // safe on nullptr; ~unique_ptr releases the model.
 }
 
-extern "C" char* parakeet_capi_transcribe_path(parakeet_ctx* ctx,
-                                               const char* wav_path, int decoder) {
+extern "C" char* parakeet_capi_transcribe_path_lang(parakeet_ctx* ctx,
+                                                    const char* wav_path, int decoder,
+                                                    const char* target_lang) {
     if (!ctx) return nullptr;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
     if (!wav_path)   { ctx->last_error = "wav_path is NULL"; return nullptr; }
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = target_lang ? target_lang : "";
     try {
-        std::string text = ctx->model->transcribe_path(wav_path, to_decoder(decoder));
+        std::string text = ctx->model->transcribe_path(wav_path, to_decoder(decoder), lang);
+        ctx->last_error.clear();
+        char* out = dup_to_c(text);
+        if (!out) { ctx->last_error = "out of memory"; return nullptr; }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
+}
+
+extern "C" char* parakeet_capi_transcribe_path(parakeet_ctx* ctx,
+                                               const char* wav_path, int decoder) {
+    // Delegate with the model default language.
+    return parakeet_capi_transcribe_path_lang(ctx, wav_path, decoder, nullptr);
+}
+
+extern "C" char* parakeet_capi_transcribe_pcm_lang(parakeet_ctx* ctx,
+                                                   const float* samples, int n_samples,
+                                                   int sample_rate, int decoder,
+                                                   const char* target_lang) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
+    if (!samples || n_samples < 0) { ctx->last_error = "invalid samples buffer"; return nullptr; }
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = target_lang ? target_lang : "";
+    try {
+        std::vector<float> pcm(samples, samples + n_samples);
+        std::string text = ctx->model->transcribe_pcm(pcm, sample_rate, to_decoder(decoder), lang);
         ctx->last_error.clear();
         char* out = dup_to_c(text);
         if (!out) { ctx->last_error = "out of memory"; return nullptr; }
@@ -227,23 +263,9 @@ extern "C" char* parakeet_capi_transcribe_path(parakeet_ctx* ctx,
 extern "C" char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* samples,
                                               int n_samples, int sample_rate,
                                               int decoder) {
-    if (!ctx) return nullptr;
-    if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
-    if (!samples || n_samples < 0) { ctx->last_error = "invalid samples buffer"; return nullptr; }
-    try {
-        std::vector<float> pcm(samples, samples + n_samples);
-        std::string text = ctx->model->transcribe_pcm(pcm, sample_rate, to_decoder(decoder));
-        ctx->last_error.clear();
-        char* out = dup_to_c(text);
-        if (!out) { ctx->last_error = "out of memory"; return nullptr; }
-        return out;
-    } catch (const std::exception& e) {
-        ctx->last_error = e.what();
-        return nullptr;
-    } catch (...) {
-        ctx->last_error = "unknown error";
-        return nullptr;
-    }
+    // Delegate with the model default language.
+    return parakeet_capi_transcribe_pcm_lang(ctx, samples, n_samples, sample_rate,
+                                             decoder, nullptr);
 }
 
 extern "C" int parakeet_capi_transcribe_pcm_batch(parakeet_ctx* ctx,
@@ -428,18 +450,21 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag) {
 
 } // namespace
 
-extern "C" parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx) {
+extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
+                                                           const char* target_lang) {
     if (!ctx) return nullptr;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
     if (!ctx->model->config().streaming.present) {
         ctx->last_error = "model is not a cache-aware streaming model";
         return nullptr;
     }
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = target_lang ? target_lang : "";
     try {
         auto* s = new (std::nothrow) parakeet_stream();
         if (!s) { ctx->last_error = "out of memory"; return nullptr; }
         s->ctx = ctx;
-        s->sess = std::make_unique<pk::StreamingSession>(ctx->model->loader());
+        s->sess = std::make_unique<pk::StreamingSession>(ctx->model->loader(), lang);
         s->mel  = std::make_unique<pk::StreamingMel>(ctx->model->loader());
         s->n_mels = s->mel->n_mels();
         ctx->last_error.clear();
@@ -451,6 +476,11 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx) {
         ctx->last_error = "unknown error";
         return nullptr;
     }
+}
+
+extern "C" parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx) {
+    // Delegate with the model default language.
+    return parakeet_capi_stream_begin_lang(ctx, nullptr);
 }
 
 extern "C" char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
