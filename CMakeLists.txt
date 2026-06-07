@@ -88,6 +88,7 @@ else()
   add_library(parakeet STATIC ${PARAKEET_SRC})
 endif()
 target_include_directories(parakeet PUBLIC include PRIVATE src ${CMAKE_SOURCE_DIR}/third_party)
+target_compile_definitions(parakeet PUBLIC $<$<CXX_COMPILER_ID:MSVC>:_USE_MATH_DEFINES>)
 target_link_libraries(parakeet PUBLIC ggml)
 
 if(PARAKEET_BUILD_CLI)
