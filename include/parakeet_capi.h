@@ -30,6 +30,16 @@ typedef struct parakeet_ctx parakeet_ctx;
 //     (start/end/conf) plus frame_sec alongside the newly-finalized text, and
 //     added "frame_sec" to the transcribe_*_json documents. The original entry
 //     points are unchanged.
+//
+// v5: the <EOU> (end of utterance) vs <EOB> (end of backchannel) distinction is
+//     now visible across the C boundary. BREAKING semantics on the streaming
+//     surface: parakeet_capi_stream_feed's `*eou_out` is now a bitmask
+//     (PARAKEET_EVENT_EOU | PARAKEET_EVENT_EOB) instead of an any-event 0/1,
+//     and the JSON "eou" field now means "an <EOU> fired" only, with a new
+//     "eob" field beside it (in v4 both meant "an <EOU> OR <EOB> fired").
+//     Added parakeet_capi_stream_drain_events (typed per-event records with
+//     is_eob + timestamps, freed with parakeet_capi_free_events) and an
+//     "events" array in the stream_feed_json / stream_finalize_json documents.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -174,13 +184,22 @@ parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
 parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
                                                  const char* target_lang);
 
+// Bits for parakeet_capi_stream_feed's *eou_out mask. <EOU> = the user
+// finished a complete utterance (a voice agent responds); <EOB> = the user
+// finished a backchannel, a short acknowledgment like "uh-huh" while the other
+// party speaks (a voice agent must NOT treat it as the user taking the turn).
+#define PARAKEET_EVENT_EOU 1
+#define PARAKEET_EVENT_EOB 2
+
 // Feed a block of 16 kHz MONO float PCM (`pcm`, length `n_samples`). The session
 // buffers the audio and decodes as full encoder chunks become available.
 // Returns the newly-finalized text since the last call as a malloc'd UTF-8
 // string (free with parakeet_capi_free_string) — "" (empty, non-NULL) if no new
 // text was finalized this call, NULL only on error. <EOU>/<EOB> are stripped
-// from the text and surfaced as events: if `eou_out` is non-NULL it is set to 1
-// when an <EOU>/<EOB> event fired during this feed, else 0.
+// from the text and surfaced as events: if `eou_out` is non-NULL it is set to
+// the bitwise OR of PARAKEET_EVENT_EOU / PARAKEET_EVENT_EOB for the event types
+// that fired during this feed (0 if none). Per-event timestamps are available
+// via parakeet_capi_stream_drain_events.
 char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
                                 int n_samples, int* eou_out);
 
@@ -190,16 +209,50 @@ char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
 // complete. Does NOT fabricate an <EOU> NeMo's streaming would not emit.
 char* parakeet_capi_stream_finalize(parakeet_stream* s);
 
+// One <EOU>/<EOB> event emitted by the streaming decoder. <EOU> marks the end
+// of a complete utterance (the user yielded the turn); <EOB> marks the end of a
+// backchannel (a short acknowledgment like "uh-huh" while the other party
+// speaks — a voice agent typically responds on <EOU> but must NOT treat <EOB>
+// as the user taking the turn). time_sec is the absolute (stream-relative)
+// emission time: encoder_frame * frame_sec.
+typedef struct parakeet_stream_event {
+    int   token;          // raw vocab id of the special token
+    int   is_eob;         // 0 = <EOU> (end of utterance), 1 = <EOB> (backchannel)
+    int   encoder_frame;  // absolute encoder-output frame index of the emission
+    float time_sec;       // encoder_frame * frame_sec, seconds from stream start
+} parakeet_stream_event;
+
+// Drain the <EOU>/<EOB> events accumulated since the last drain. On success
+// returns the event count (>= 0) and, when the count is nonzero, sets
+// `*out_events` to a malloc'd array of that many records (release with
+// parakeet_capi_free_events); `*out_events` is NULL when the count is 0.
+// Returns -1 on error (NULL stream/out pointer) with `*out_events` NULL.
+// The queue is shared with the JSON entry points: stream_feed_json /
+// stream_finalize_json also drain it (into their "events" array), so use one
+// style or the other per stream.
+int parakeet_capi_stream_drain_events(parakeet_stream* s,
+                                      parakeet_stream_event** out_events);
+
+// Free an event array previously returned by parakeet_capi_stream_drain_events.
+// Safe on NULL.
+void parakeet_capi_free_events(parakeet_stream_event* events);
+
 // Like parakeet_capi_stream_feed but returns a malloc'd UTF-8 JSON document
 // instead of bare text:
-//   {"text":"...","eou":0,"frame_sec":0.080000,
+//   {"text":"...","eou":0,"eob":0,"frame_sec":0.080000,
+//    "events":[{"type":"eou","frame":31,"t":2.480}, ...],
 //    "words":[{"w":"...","start":0.480,"end":0.640,"conf":0.9100}, ...]}
 // "text" is the newly-finalized text since the last call ("" if none); "eou" is
-// 1 iff an <EOU>/<EOB> fired during this feed; "frame_sec" is the encoder frame
-// stride in seconds; "words" are the words finalized this call with absolute
-// (stream-relative) start/end seconds and 'min'-aggregate confidence (the same
-// drain as the offline pk::group_words). Returns NULL only on error (see
-// parakeet_capi_last_error). Free with parakeet_capi_free_string.
+// 1 iff an <EOU> fired during this feed and "eob" 1 iff an <EOB> fired (see
+// parakeet_stream_event for the semantics — they are distinct turn-taking
+// signals, not conflated); "frame_sec" is the encoder frame stride in seconds;
+// "events" are the <EOU>/<EOB> events drained this call, each with "type"
+// ("eou" = end of utterance, "eob" = backchannel), the absolute encoder frame
+// and the emission time in seconds (frame * frame_sec); "words" are the words
+// finalized this call with absolute (stream-relative) start/end seconds and
+// 'min'-aggregate confidence (the same drain as the offline pk::group_words).
+// Returns NULL only on error (see parakeet_capi_last_error). Free with
+// parakeet_capi_free_string.
 char* parakeet_capi_stream_feed_json(parakeet_stream* s, const float* pcm,
                                      int n_samples);
 

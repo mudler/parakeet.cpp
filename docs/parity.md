@@ -570,8 +570,17 @@ from `libparakeet.so` (verified via `nm -D`).
 - `tests/test_capi_stream.cpp` (`test_capi_stream`) — feeds `speech.wav` PCM in
   chunks through the streaming C-API; the concatenated text + `finalize` equals
   `baseline.stream_text` from `/tmp/baseline_eou_stream.gguf` (NeMo streaming).
-  Skips (exit 77) unless `PARAKEET_TEST_GGUF_EOU` +
+  A second phase streams a two-utterance clip (speech + 0.6 s silence + speech,
+  the `gen_stream_reset_baseline.py` construction) and asserts
+  `parakeet_capi_stream_drain_events` (ABI v5) surfaces the mid-stream `<EOU>`
+  as a typed record agreeing with the per-feed `eou_out` event mask
+  (PARAKEET_EVENT_EOU | PARAKEET_EVENT_EOB), with sane monotone timestamps. Skips (exit 77) unless `PARAKEET_TEST_GGUF_EOU` +
   `PARAKEET_TEST_BASELINE_EOU_STREAM` are set.
+- `tests/test_capi_stream_json.cpp` (`test_capi_stream_json`) — drives the
+  streaming JSON entry points on `speech.wav` and asserts the documents carry
+  `frame_sec`, per-word timestamps, and the `"events"` array; a second phase
+  streams the two-utterance clip and asserts a typed `{"type":"eou",...}` event
+  appears. Skips (exit 77) unless `PARAKEET_TEST_GGUF_EOU` is set.
 
 Reproduce:
 

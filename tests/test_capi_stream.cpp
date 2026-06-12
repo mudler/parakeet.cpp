@@ -1,6 +1,7 @@
 #include "parakeet_capi.h"
-#include "audio_io.hpp"   // pk::load_audio_16k_mono (test links the parakeet lib)
-#include "parity.hpp"     // pktest::load_kv_str / load_baseline_i32
+#include "audio_io.hpp"     // pk::load_audio_16k_mono (test links the parakeet lib)
+#include "parity.hpp"       // pktest::load_kv_str / load_baseline_i32
+#include "stream_clips.hpp" // pktest::two_utterance_clip
 
 #include <cstdio>
 #include <cstdlib>
@@ -115,7 +116,6 @@ int main() {
     parakeet_capi_free_string(fin);
 
     parakeet_capi_stream_free(s);
-    parakeet_capi_free(ctx);
 
     std::fprintf(stderr, "test_capi_stream: got stream_text = %s\n", acc.c_str());
     std::fprintf(stderr, "test_capi_stream: any in-stream EOU event = %s\n",
@@ -128,13 +128,113 @@ int main() {
             "  got:      %s\n"
             "  expected: %s\n",
             acc.c_str(), ref_text.c_str());
+        parakeet_capi_free(ctx);
         return 1;
     }
+
+    // --- Phase 2: drain_events on a TWO-utterance clip (ABI v5) ---
+    // An <EOU> fires mid-stream (see stream_clips.hpp). The typed drain must
+    // surface it with is_eob==0 and a sane absolute timestamp; the per-feed
+    // event mask and the drained queue must agree.
+    {
+        std::vector<float> clip = pktest::two_utterance_clip(audio.samples);
+
+        parakeet_stream* s2 = parakeet_capi_stream_begin(ctx);
+        if (!s2) {
+            std::fprintf(stderr, "test_capi_stream: phase-2 stream_begin failed: %s\n",
+                         parakeet_capi_last_error(ctx));
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        int flagged_feeds = 0;
+        std::vector<parakeet_stream_event> drained;
+        const int n2 = (int)clip.size();
+        for (int off = 0; off < n2; off += chunk) {
+            const int len = std::min(chunk, n2 - off);
+            int eou = 0;
+            char* t = parakeet_capi_stream_feed(s2, clip.data() + off, len, &eou);
+            if (!t) {
+                std::fprintf(stderr, "test_capi_stream: phase-2 feed NULL: %s\n",
+                             parakeet_capi_last_error(ctx));
+                parakeet_capi_stream_free(s2);
+                parakeet_capi_free(ctx);
+                return 1;
+            }
+            parakeet_capi_free_string(t);
+            parakeet_stream_event* evs = nullptr;
+            const int n_ev = parakeet_capi_stream_drain_events(s2, &evs);
+            if (n_ev < 0) {
+                std::fprintf(stderr, "test_capi_stream: drain_events errored: %s\n",
+                             parakeet_capi_last_error(ctx));
+                parakeet_capi_stream_free(s2);
+                parakeet_capi_free(ctx);
+                return 1;
+            }
+            // The bare feed's event mask and the typed queue must agree per feed.
+            int want_mask = 0;
+            for (int i = 0; i < n_ev; ++i)
+                want_mask |= evs[i].is_eob ? PARAKEET_EVENT_EOB : PARAKEET_EVENT_EOU;
+            if (eou != want_mask) {
+                std::fprintf(stderr,
+                    "test_capi_stream: FAIL — feed event mask (%d) disagrees with "
+                    "drained events (want %d from %d events)\n", eou, want_mask, n_ev);
+                parakeet_capi_free_events(evs);
+                parakeet_capi_stream_free(s2);
+                parakeet_capi_free(ctx);
+                return 1;
+            }
+            if (eou) ++flagged_feeds;
+            drained.insert(drained.end(), evs, evs + n_ev);
+            parakeet_capi_free_events(evs);
+        }
+        char* fin2 = parakeet_capi_stream_finalize(s2);
+        if (fin2) parakeet_capi_free_string(fin2);
+        {
+            // Events from the finalize flush (e.g. a trailing end-of-clip <EOU>)
+            // land in the same queue.
+            parakeet_stream_event* evs = nullptr;
+            const int n_ev = parakeet_capi_stream_drain_events(s2, &evs);
+            if (n_ev > 0) drained.insert(drained.end(), evs, evs + n_ev);
+            parakeet_capi_free_events(evs);
+        }
+        parakeet_capi_stream_free(s2);
+
+        const float clip_secs = (float)n2 / 16000.0f;
+        if (drained.empty() || flagged_feeds < 1) {
+            std::fprintf(stderr,
+                "test_capi_stream: FAIL — no <EOU> event drained on the "
+                "two-utterance clip (flagged feeds=%d)\n", flagged_feeds);
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        float prev_t = -1.0f;
+        for (const parakeet_stream_event& e : drained) {
+            const bool sane = (e.is_eob == 0 || e.is_eob == 1) &&
+                              e.encoder_frame >= 0 &&
+                              e.time_sec >= prev_t &&
+                              e.time_sec <= clip_secs + 1.0f;
+            if (!sane) {
+                std::fprintf(stderr,
+                    "test_capi_stream: FAIL — bad event record (token=%d is_eob=%d "
+                    "frame=%d t=%.3f, clip=%.2fs)\n",
+                    e.token, e.is_eob, e.encoder_frame, e.time_sec, clip_secs);
+                parakeet_capi_free(ctx);
+                return 1;
+            }
+            prev_t = e.time_sec;
+            std::fprintf(stderr, "test_capi_stream: event %s frame=%d t=%.3fs\n",
+                         e.is_eob ? "<EOB>" : "<EOU>", e.encoder_frame, e.time_sec);
+        }
+    }
+
+    parakeet_capi_free(ctx);
 
     std::fprintf(stderr,
         "test_capi_stream: PASS — streaming C-API transcript == NeMo cache-aware "
         "streaming decode (%zu ref tokens, EOU stripped + surfaced as events; "
-        "no in-stream <EOU> for this clip, matching NeMo eou_in_stream=0)\n",
+        "no in-stream <EOU> for this clip, matching NeMo eou_in_stream=0), and "
+        "drain_events surfaces typed <EOU>/<EOB> records on the two-utterance "
+        "clip\n",
         ref_ids.size());
     return 0;
 }

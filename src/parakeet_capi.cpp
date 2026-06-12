@@ -24,7 +24,14 @@
 //     surface per-word timestamps (start/end/conf) plus frame_sec alongside the
 //     newly-finalized text + eou flag, and a "frame_sec" field added to the
 //     transcribe_*_json documents. Original entry points unchanged.
-#define PARAKEET_CAPI_ABI_VERSION 4
+// v5: <EOU> vs <EOB> distinction across the C boundary. BREAKING semantics:
+//     stream_feed's *eou_out is now a bitmask (PARAKEET_EVENT_EOU |
+//     PARAKEET_EVENT_EOB) instead of an any-event 0/1, and the JSON "eou"
+//     field now means "an <EOU> fired" only, with a new "eob" field beside it.
+//     Added stream_drain_events / free_events (typed per-event records) and
+//     the "events" array in the stream_feed_json / stream_finalize_json
+//     documents.
+#define PARAKEET_CAPI_ABI_VERSION 5
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -137,6 +144,13 @@ void append_json_string(std::string& out, const std::string& s) {
     out += '"';
 }
 
+// Append an int to `out` as a bare JSON number.
+void append_json_int(std::string& out, int v) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%d", v);
+    out += buf;
+}
+
 // Append a float to `out` formatted with `fmt` (e.g. "%.3f"). NaN/Inf are
 // emitted as 0 (JSON has no NaN/Inf literal); confidences/times are finite here.
 void append_json_float(std::string& out, const char* fmt, float v) {
@@ -178,10 +192,8 @@ std::string transcription_to_json(const pk::Transcription& tr, float frame_sec) 
     out += "],\"tokens\":[";
     for (size_t i = 0; i < tr.tokens.size(); ++i) {
         if (i) out += ',';
-        char idbuf[16];
-        std::snprintf(idbuf, sizeof(idbuf), "%d", tr.tokens[i].id);
         out += "{\"id\":";
-        out += idbuf;
+        append_json_int(out, tr.tokens[i].id);
         out += ",\"t\":";
         append_json_float(out, "%.3f", (float)tr.tokens[i].frame * frame_sec);
         out += ",\"conf\":";
@@ -428,11 +440,16 @@ namespace {
 // new PCM is produced frame-local by StreamingMel in the feed/finalize entry
 // points, NOT recomputed over the whole buffer here. `flush` marks the final
 // partial chunk is_last (keep_all_outputs), draining the remaining frames. Sets
-// *eou to 1 if an <EOU>/<EOB> event fired in this pass. Returns the newly-
+// eou_flag / eob_flag to 1 if an <EOU> / <EOB> (respectively) fired in this
+// pass — attributed by watermarking the session's un-drained event queue, so
+// the queue itself is left intact for the caller to drain. Returns the newly-
 // finalized text.
-std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag) {
+std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag,
+                           int& eob_flag) {
     eou_flag = 0;
+    eob_flag = 0;
     pk::StreamingSession& sess = *s->sess;
+    const size_t ev0 = sess.events().size();
 
     const int n_mels = s->n_mels;
     const int T = s->mel_T;
@@ -474,12 +491,13 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag) {
 
         sess.feed_mel_chunk(win, win_frames, is_last);
         new_text += sess.take_new_text();
-        if (sess.last_chunk_had_eou()) eou_flag = 1;
 
         s->mel_buffer_idx += chunk_size;  // shift_size == chunk_size here
         s->first_chunk = false;
         if (is_last) break;               // flushed the end-of-stream tail
     }
+    for (size_t i = ev0; i < sess.events().size(); ++i)
+        (sess.events()[i].is_eob ? eob_flag : eou_flag) = 1;
     return new_text;
 }
 
@@ -536,9 +554,10 @@ extern "C" char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
             std::vector<float> frames = s->mel->feed(pcm, n_samples, n_new);
             append_mel_frames(s, frames, n_new);
         }
-        int eou = 0;
-        std::string delta = feed_available(s, /*flush=*/false, eou);
-        if (eou_out) *eou_out = eou;
+        int eou = 0, eob = 0;
+        std::string delta = feed_available(s, /*flush=*/false, eou, eob);
+        if (eou_out) *eou_out = (eou ? PARAKEET_EVENT_EOU : 0) |
+                                (eob ? PARAKEET_EVENT_EOB : 0);
         s->ctx->last_error.clear();
         char* out = dup_to_c(delta);
         if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
@@ -563,8 +582,8 @@ extern "C" char* parakeet_capi_stream_finalize(parakeet_stream* s) {
             std::vector<float> tail = s->mel->finalize(n_tail);
             append_mel_frames(s, tail, n_tail);
         }
-        int eou = 0;
-        std::string delta = feed_available(s, /*flush=*/true, eou);
+        int eou = 0, eob = 0;
+        std::string delta = feed_available(s, /*flush=*/true, eou, eob);
         // After the flush the session's finalize() is a no-op text-wise (no extra
         // audio) but documents the end-of-stream tail semantics.
         delta += s->sess->finalize();
@@ -582,22 +601,74 @@ extern "C" char* parakeet_capi_stream_finalize(parakeet_stream* s) {
     }
 }
 
+extern "C" int parakeet_capi_stream_drain_events(parakeet_stream* s,
+                                                 parakeet_stream_event** out_events) {
+    if (out_events) *out_events = nullptr;
+    if (!s || !out_events) return -1;
+    if (!s->ctx || !s->ctx->model || !s->sess) return -1;
+    try {
+        std::vector<pk::EouEvent> evs = s->sess->drain_events();
+        s->ctx->last_error.clear();
+        if (evs.empty()) return 0;
+        auto* arr = static_cast<parakeet_stream_event*>(
+            std::malloc(evs.size() * sizeof(parakeet_stream_event)));
+        if (!arr) { s->ctx->last_error = "out of memory"; return -1; }
+        for (size_t i = 0; i < evs.size(); ++i) {
+            arr[i].token         = (int)evs[i].token;
+            arr[i].is_eob        = evs[i].is_eob ? 1 : 0;
+            arr[i].encoder_frame = evs[i].encoder_frame;
+            arr[i].time_sec      = (float)evs[i].time_sec;
+        }
+        *out_events = arr;
+        return (int)evs.size();
+    } catch (const std::exception& e) {
+        s->ctx->last_error = e.what();
+        return -1;
+    } catch (...) {
+        s->ctx->last_error = "unknown error";
+        return -1;
+    }
+}
+
+extern "C" void parakeet_capi_free_events(parakeet_stream_event* events) {
+    std::free(events);
+}
+
 namespace {
 
 // Serialize a streaming feed/finalize result to JSON: the newly-finalized text,
-// the eou flag, frame_sec, and the words drained this call (absolute seconds).
-// Shape matches the header doc on parakeet_capi_stream_feed_json.
-std::string stream_json(const std::string& text, int eou, float frame_sec,
+// the per-type eou/eob flags, frame_sec, the <EOU>/<EOB> events drained this
+// call, and the words drained this call (absolute seconds). Shape matches the
+// header doc on parakeet_capi_stream_feed_json. "eou" means an <EOU> fired and
+// "eob" an <EOB> — they are NOT conflated (a voice agent responds on eou and
+// must not treat eob as the user taking the turn); "events" carries the
+// per-event timestamps.
+std::string stream_json(const std::string& text, int eou, int eob,
+                        float frame_sec,
+                        const std::vector<pk::EouEvent>& events,
                         const std::vector<pk::Word>& words) {
     std::string out;
-    out.reserve(80 + words.size() * 48);
+    out.reserve(80 + events.size() * 36 + words.size() * 48);
     out += "{\"text\":";
     append_json_string(out, text);
     out += ",\"eou\":";
     out += (eou ? "1" : "0");
+    out += ",\"eob\":";
+    out += (eob ? "1" : "0");
     out += ",\"frame_sec\":";
     append_json_float(out, "%.6f", frame_sec);
-    out += ",\"words\":[";
+    out += ",\"events\":[";
+    for (size_t i = 0; i < events.size(); ++i) {
+        if (i) out += ',';
+        out += "{\"type\":";
+        out += events[i].is_eob ? "\"eob\"" : "\"eou\"";
+        out += ",\"frame\":";
+        append_json_int(out, events[i].encoder_frame);
+        out += ",\"t\":";
+        append_json_float(out, "%.3f", (float)events[i].time_sec);
+        out += '}';
+    }
+    out += "],\"words\":[";
     for (size_t i = 0; i < words.size(); ++i) {
         if (i) out += ',';
         out += "{\"w\":";
@@ -636,10 +707,11 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
             std::vector<float> frames = s->mel->feed(pcm, n_samples, n_new);
             append_mel_frames(s, frames, n_new);
         }
-        int eou = 0;
-        std::string delta = feed_available(s, /*flush=*/false, eou);
+        int eou = 0, eob = 0;
+        std::string delta = feed_available(s, /*flush=*/false, eou, eob);
+        std::vector<pk::EouEvent> events = s->sess->drain_events();
         std::vector<pk::Word> words = s->sess->drain_words();
-        std::string json = stream_json(delta, eou, stream_frame_sec(s), words);
+        std::string json = stream_json(delta, eou, eob, stream_frame_sec(s), events, words);
         s->ctx->last_error.clear();
         char* out = dup_to_c(json);
         if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
@@ -662,11 +734,12 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
             std::vector<float> tail = s->mel->finalize(n_tail);
             append_mel_frames(s, tail, n_tail);
         }
-        int eou = 0;
-        std::string delta = feed_available(s, /*flush=*/true, eou);
+        int eou = 0, eob = 0;
+        std::string delta = feed_available(s, /*flush=*/true, eou, eob);
         delta += s->sess->finalize();
+        std::vector<pk::EouEvent> events = s->sess->drain_events();
         std::vector<pk::Word> words = s->sess->drain_words();
-        std::string json = stream_json(delta, eou, stream_frame_sec(s), words);
+        std::string json = stream_json(delta, eou, eob, stream_frame_sec(s), events, words);
         s->finalized = true;
         s->ctx->last_error.clear();
         char* out = dup_to_c(json);

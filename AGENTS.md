@@ -253,7 +253,7 @@ parakeet_capi_free_string
 parakeet_capi_last_error
 # streaming (cache-aware EOU model parakeet_realtime_eou_120m-v1):
 parakeet_capi_stream_begin
-parakeet_capi_stream_feed       # 16k mono f32 PCM -> newly-finalized text; *eou_out=1 on <EOU>/<EOB>
+parakeet_capi_stream_feed       # 16k mono f32 PCM -> newly-finalized text; *eou_out = event bitmask (ABI v5)
 parakeet_capi_stream_finalize   # flush the end-of-stream tail
 parakeet_capi_stream_free
 ```
@@ -274,6 +274,16 @@ semantics. Additive changes (new functions) are fine without bumping.
 Streaming semantics: `parakeet_capi_stream_feed` buffers PCM, decodes encoder
 chunks as audio arrives (carried encoder/decoder caches), and returns the
 newly-finalized text (`<EOU>`/`<EOB>` STRIPPED, surfaced via `*eou_out`).
+Since ABI v5 `*eou_out` is a bitmask — `PARAKEET_EVENT_EOU` (end of utterance:
+respond) | `PARAKEET_EVENT_EOB` (backchannel: do not treat as a turn) — and the
+streaming JSON documents carry separate `"eou"`/`"eob"` 0/1 flags (in v4 a
+single conflated any-event flag). Per-event timestamps come from
+`parakeet_capi_stream_drain_events`
+(`parakeet_stream_event{token,is_eob,encoder_frame,time_sec}`, free with
+`parakeet_capi_free_events`) or the `"events"` array
+(`{"type":"eou"|"eob","frame","t"}`) in the `stream_feed_json` /
+`stream_finalize_json` documents. The event queue is shared between the typed
+drain and the JSON entry points — use one style per stream.
 `parakeet_capi_stream_finalize` flushes the streaming tail and does NOT
 fabricate an `<EOU>` NeMo's cache-aware streaming would not emit (for a final
 chunk whose right context is incomplete, the trailing `<EOU>` is dropped exactly

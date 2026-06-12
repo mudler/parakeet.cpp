@@ -109,6 +109,11 @@ public:
     // Move out all EOU/EOB events collected so far (drains the queue).
     std::vector<EouEvent> drain_events();
 
+    // Peek at the not-yet-drained EOU/EOB events without consuming them (the
+    // C-API uses the size as a watermark to attribute events to one feed pass
+    // while leaving the queue intact for a later drain).
+    const std::vector<EouEvent>& events() const { return events_; }
+
     // Move out the WORDS finalized since the previous drain_words() call, with
     // per-word start/end (seconds) and 'min'-aggregate confidence (matching the
     // offline pk::group_words / NeMo timestamps=True convention). A word is
