@@ -1,9 +1,13 @@
 name: release
 
-# Pre-built parakeet-cli bundles for every release (issue #21).
+# Pre-built parakeet-cli and parakeet-server bundles for every release (issue #21).
 #
-# One self-contained binary per (platform, backend) pair, packaged with the
-# LICENSE and README. BUILD_SHARED_LIBS=OFF folds the ggml backends into the
+# Two self-contained binaries (parakeet-cli + parakeet-server) per (platform,
+# backend) pair, packaged with the LICENSE and README. parakeet-server is the
+# OpenAI-compatible HTTP server (examples/server) — the same downstream value
+# llama.cpp/whisper.cpp ship as llama-server/whisper-server. It already built
+# in this workflow (PARAKEET_BUILD_SERVER defaults ON); this just packages it.
+# BUILD_SHARED_LIBS=OFF folds the ggml backends into the
 # binary (the docker images keep them shared; a download-and-run bundle should
 # not need a lib directory). GGML_NATIVE=OFF keeps the binaries portable
 # across CPUs, same as the docker images and ci.yml.
@@ -123,6 +127,7 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
@@ -137,13 +142,16 @@ jobs:
         run: |
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
+          grep -qi usage <<<"$out"
 
       - name: Package
         id: pack
         run: |
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-bin-linux-${{ matrix.backend }}-${{ matrix.arch }}"
           mkdir "$BUNDLE"
-          cp build/examples/cli/parakeet-cli LICENSE README.md "$BUNDLE"/
+          cp build/examples/cli/parakeet-cli build/examples/server/parakeet-server \
+             LICENSE README.md "$BUNDLE"/
           if [ "${{ matrix.backend }}" = "cuda" ]; then
             cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
@@ -248,6 +256,7 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
             ${{ matrix.cmake_args }}
 
@@ -260,13 +269,16 @@ jobs:
         run: |
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
+          grep -qi usage <<<"$out"
 
       - name: Package
         id: pack
         run: |
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-bin-macos-${{ matrix.backend }}-${{ matrix.arch }}"
           mkdir "$BUNDLE"
-          cp build/examples/cli/parakeet-cli LICENSE README.md "$BUNDLE"/
+          cp build/examples/cli/parakeet-cli build/examples/server/parakeet-server \
+             LICENSE README.md "$BUNDLE"/
           tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
 
@@ -385,6 +397,7 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
@@ -398,6 +411,8 @@ jobs:
         run: |
           out=$(./build/examples/cli/parakeet-cli.exe 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server.exe --help 2>&1 || true)
+          grep -qi usage <<<"$out"
 
       - name: Package
         id: pack
@@ -405,7 +420,7 @@ jobs:
         run: |
           $bundle = "parakeet-${{ steps.ver.outputs.version }}-bin-win-${{ matrix.backend }}-x64"
           New-Item -ItemType Directory -Path $bundle | Out-Null
-          Copy-Item build/examples/cli/parakeet-cli.exe,LICENSE,README.md $bundle/
+          Copy-Item build/examples/cli/parakeet-cli.exe,build/examples/server/parakeet-server.exe,LICENSE,README.md $bundle/
           Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
           "bundle=$bundle" | Out-File -Append $env:GITHUB_OUTPUT
 
