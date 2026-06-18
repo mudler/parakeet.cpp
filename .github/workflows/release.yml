@@ -9,7 +9,7 @@ name: release
 # across CPUs, same as the docker images and ci.yml.
 #
 # Variants:
-#   linux   x64: cpu, vulkan, cuda      arm64: cpu
+#   linux   x64: cpu, vulkan, cuda      arm64: cpu, vulkan
 #   macos   arm64: metal                x64: cpu (cross-compiled on the arm
 #                                       runner; GitHub is retiring Intel ones)
 #   windows x64: cpu, vulkan, cuda
@@ -40,9 +40,11 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # linux: cpu (x64 + arm64, native runners), vulkan (LunarG SDK), cuda
-  # (CUDA 13 apt repo). cpu/vulkan build on ubuntu-22.04 for a wider glibc
-  # range; cuda needs the ubuntu2404 CUDA repo.
+  # linux: cpu (x64 + arm64, native runners), vulkan (x64 via the LunarG SDK,
+  # arm64 via Ubuntu apt), cuda (CUDA 13 apt repo). cpu and x64 vulkan build on
+  # ubuntu-22.04 for a wider glibc range; cuda and arm64 vulkan build on
+  # ubuntu-24.04 (the CUDA 13 repo and the glslc/shaderc apt package are not
+  # available on 22.04).
   # ---------------------------------------------------------------------------
   build-linux:
     runs-on: ${{ matrix.runner }}
@@ -64,6 +66,13 @@ jobs:
           - backend: vulkan
             arch: x64
             runner: ubuntu-22.04
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
+            cuda_archs: ""
+          - backend: vulkan
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            # LunarG ships no arm64 SDK repo, so the Vulkan toolchain comes from
+            # Ubuntu apt instead; glslc (shaderc) is packaged on 24.04, not 22.04.
             cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
             cuda_archs: ""
           - backend: cuda
@@ -89,8 +98,8 @@ jobs:
             echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install Vulkan SDK (LunarG)
-        if: matrix.backend == 'vulkan'
+      - name: Install Vulkan SDK (LunarG, x64)
+        if: matrix.backend == 'vulkan' && matrix.arch == 'x64'
         run: |
           wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
             | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
@@ -98,6 +107,16 @@ jobs:
             https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk
+
+      - name: Install Vulkan (Ubuntu apt, arm64)
+        if: matrix.backend == 'vulkan' && matrix.arch == 'arm64'
+        # LunarG has no arm64 SDK repo. ggml's Vulkan backend needs, at build
+        # time, the loader/headers (libvulkan-dev), glslc from shaderc to compile
+        # the compute shaders, and the SPIR-V registry headers (spirv-headers) —
+        # all in the Ubuntu 24.04 archive. glslangValidator is not required.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev glslc spirv-headers
 
       - name: Install CUDA toolkit 13
         if: matrix.backend == 'cuda'
