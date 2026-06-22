@@ -72,13 +72,17 @@ Response format_transcription(const pk::Transcription& tr, Format fmt,
     b += "\"text\":\"" + json_escape(tr.text) + "\"";
     b += "}]";
     if (include_words) {
+        // Each word carries the NeMo per-word confidence (Word.conf); surface it
+        // under the same "conf" key parakeet-cli --json uses so clients can flag
+        // low-confidence spans.
         b += ",\"words\":[";
         for (size_t i = 0; i < tr.words.size(); ++i) {
             const pk::Word& w = tr.words[i];
             if (i) b += ",";
             b += "{\"word\":\"" + json_escape(w.text) + "\",";
             b += "\"start\":" + fixed(w.start, 3) + ",";
-            b += "\"end\":" + fixed(w.end, 3) + "}";
+            b += "\"end\":" + fixed(w.end, 3) + ",";
+            b += "\"conf\":" + fixed(w.conf, 4) + "}";
         }
         b += "]";
     }

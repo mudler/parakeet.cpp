@@ -46,6 +46,7 @@ int main() {
     check(contains(rv.body, "\"segments\":["), "verbose segments");
     check(contains(rv.body, "\"words\":["), "verbose words present");
     check(contains(rv.body, "\"word\":\"hello\""), "verbose word entry");
+    check(contains(rv.body, "\"conf\":0.9100"), "verbose word confidence");
 
     Response rvn = format_transcription(tr, Format::kVerboseJson, 7.4, false);
     check(!contains(rvn.body, "\"words\":["), "verbose words gated off");
