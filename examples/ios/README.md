@@ -42,10 +42,11 @@ physical device.
 
 - **Model must be a streaming model** (`nemotron-3.5-asr-streaming-0.6b` or
   `parakeet_realtime_eou_120m-v1`). Offline-only GGUFs will fail `stream_begin`.
-- **q4_k is ~455 MB** in the app bundle — fine for a dev build; for the App Store
+- **q4_k is ~0.7 GB** in the app bundle — fine for a dev build; for the App Store
   you'd download it on first launch instead of bundling.
 - **Metal** runs on device and on Apple-Silicon simulators. Intel simulators fall
   back to CPU.
-- The mic→16 kHz path uses `AVAudioConverter`; language is fixed to `auto` in
-  `TranscriberModel.begin(lang:)` — change it for a forced locale.
+- The mic→16 kHz path uses `AVAudioConverter`. Language is chosen in the UI picker
+  (`TranscriberModel.lang`, default `en`) and passed to `ParakeetSession.begin(lang:)`;
+  `auto` tends to mis-detect, so the picker defaults to a forced locale.
 - This is a demo: no error UI beyond a status line, single utterance buffer.

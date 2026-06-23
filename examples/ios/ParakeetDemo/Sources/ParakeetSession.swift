@@ -35,7 +35,7 @@ final class ParakeetSession {
 
     /// Feed 16 kHz mono float PCM. Returns newly-finalized text (may be empty)
     /// and the EOU/EOB event mask. Runs synchronously on the session queue.
-    func feed(_ pcm: [Float]) -> (text: String, eou: Int32) {
+    func feed(_ pcm: [Float]) -> (text: String, events: Int32) {
         queue.sync {
             guard let s = stream else { return ("", 0) }
             var mask: Int32 = 0
