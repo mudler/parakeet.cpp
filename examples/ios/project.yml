@@ -1,0 +1,37 @@
+# XcodeGen spec — run `xcodegen generate` here to (re)create ParakeetDemo.xcodeproj.
+# The .xcodeproj is generated, gitignored; this file is the source of truth.
+name: ParakeetDemo
+options:
+  bundleIdPrefix: cpp.parakeet
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  ParakeetDemo:
+    type: application
+    platform: iOS
+    sources:
+      - path: ParakeetDemo/Sources
+      - path: ParakeetDemo/Resources      # put model.gguf here (gitignored)
+        optional: true
+        buildPhase: resources
+    dependencies:
+      - framework: vendor/Parakeet.xcframework   # built by scripts/build_xcframework.sh
+        embed: false                              # static lib, not embedded
+      - sdk: Metal.framework
+      - sdk: Accelerate.framework
+    info:
+      path: ParakeetDemo/Info.plist
+      properties:
+        CFBundleDisplayName: Parakeet
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: "Live on-device speech transcription."
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: ParakeetDemo/Sources/Parakeet-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/vendor/include
+        # -ObjC force-loads ObjC classes/categories from the static libs
+        # (ggml-metal is Objective-C); without it iOS crashes at startup with
+        # "-[OS_dispatch_mach_msg _setContext:]: unrecognized selector". See
+        # Apple QA1490. -lc++ for the C++ runtime (ggml/parakeet are C++).
+        OTHER_LDFLAGS: -ObjC -lc++
+        TARGETED_DEVICE_FAMILY: "1,2"

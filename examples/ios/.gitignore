@@ -1,0 +1,6 @@
+ParakeetDemo.xcodeproj/
+ParakeetDemo/Info.plist
+vendor/
+build-*/
+*.a
+ParakeetDemo/Resources/*.gguf
