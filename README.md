@@ -416,6 +416,17 @@ NeMo is a great training framework, but running Parakeet just for inference drag
 
 ---
 
+## Community projects
+
+Built on parakeet.cpp by the community (not maintained or tested by the core team):
+
+- [**parakeet-ios-demo**](https://github.com/Kashif-E/parakeet-ios-demo) — live,
+  on-device streaming speech-to-text on iOS (SwiftUI) over the streaming C-API,
+  with a side-by-side compare against Apple's SpeechTranscriber and Moonshine.
+  By [@Kashif-E](https://github.com/Kashif-E).
+
+---
+
 ## Citation
 
 If you use parakeet.cpp, please cite this repository and the original models:
