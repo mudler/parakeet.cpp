@@ -6,6 +6,44 @@
 
 namespace pk {
 
+// U+2581 (▁) SentencePiece meta-space, UTF-8 0xE2 0x96 0x81.
+static bool piece_starts_with_meta(const std::string& p) {
+    return p.size() >= 3 &&
+           (unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x96 &&
+           (unsigned char)p[2] == 0x81;
+}
+
+// Detokenize ids[from, to) into a text fragment WITHOUT detokenize()'s global
+// single-leading-space strip, so the fragment can be APPENDED to an existing
+// transcript. Mirrors detokenize() step 1+2 exactly (piece concat, ▁->space).
+// detokenize is prefix-stable (concat + per-byte ▁->space, and the leading-space
+// strip only ever touches byte 0 of the whole string), so appending the fragment
+// for the newly emitted tokens yields a transcript byte-identical to
+// detokenize(all non-special tokens) — without rebuilding it every chunk.
+static std::string detok_fragment(const std::vector<std::string>& pieces,
+                                  const std::vector<int32_t>& ids,
+                                  size_t from, size_t to) {
+    std::string cat;
+    for (size_t i = from; i < to; ++i) {
+        int32_t id = ids[i];
+        if (id >= 0 && (size_t)id < pieces.size()) cat += pieces[(size_t)id];
+    }
+    std::string out;
+    out.reserve(cat.size());
+    for (size_t i = 0; i < cat.size();) {
+        if (i + 3 <= cat.size() &&
+            (unsigned char)cat[i]   == 0xE2 &&
+            (unsigned char)cat[i+1] == 0x96 &&
+            (unsigned char)cat[i+2] == 0x81) {
+            out += ' ';
+            i += 3;
+        } else {
+            out += cat[i++];
+        }
+    }
+    return out;
+}
+
 StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& target_lang)
     : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml) {
     const ParakeetConfig& cfg = ml.config();
@@ -61,13 +99,15 @@ void StreamingSession::reset() {
     events_.clear();
     word_tokens_.clear();
     words_.clear();
+    final_words_.clear();
+    wt_cursor_ = 0;
     words_finalized_ = 0;
     words_taken_ = 0;
 }
 
 void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
     last_chunk_had_eou_ = false;
-    bool text_changed = false;
+    const size_t ns_before = non_special_.size();
     for (int32_t tok : emitted) {
         if (tok == eou_id_ || tok == eob_id_) {
             // EOU/EOB: surface as an event, do NOT add to the text.
@@ -83,16 +123,23 @@ void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
             last_chunk_had_eou_ = true;
         } else {
             non_special_.push_back(tok);
-            text_changed = true;
         }
     }
-    if (text_changed) {
-        text_ = detokenize(ml_.config().tokenizer_pieces, non_special_);
+    // Append ONLY the newly emitted tokens' text to the running transcript
+    // (detokenize is prefix-stable), instead of re-detokenizing the whole session
+    // history every chunk.
+    if (non_special_.size() > ns_before) {
+        std::string delta = detok_fragment(ml_.config().tokenizer_pieces,
+                                            non_special_, ns_before, non_special_.size());
+        if (ns_before == 0 && !delta.empty() && delta[0] == ' ') delta.erase(0, 1);
+        text_ += delta;
+        reprocess_this_chunk_ += (non_special_.size() - ns_before);
     }
 }
 
 std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& mel_chunk,
                                                       int n_frames, bool is_last) {
+    reprocess_this_chunk_ = 0;
     // 1. Encoder step: the chunk's valid encoder frames, row-major [valid, d_model]
     //    (d_model fastest) — exactly the orientation rnnt_decode_frames expects.
     int n_valid = 0;
@@ -180,6 +227,8 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
         state_.last_token = -1;     // SOS sentinel (nothing emitted yet)
         state_.have_token = false;
     }
+    if (reprocess_this_chunk_ > max_chunk_reprocess_)
+        max_chunk_reprocess_ = reprocess_this_chunk_;
     return emitted;
 }
 
@@ -201,17 +250,48 @@ std::string StreamingSession::finalize() {
 }
 
 void StreamingSession::regroup_words(bool flush_all) {
-    // Re-run the validated offline grouping over the whole accumulated
-    // non-special token sequence (it does the punctuation lookahead / refinement
-    // exactly like the offline transcribe_with_timestamps path). The last word is
-    // still "open" (its text/end can change when more tokens arrive), so only
-    // words BEFORE it are considered final mid-stream; flush_all makes every word
-    // final at end-of-stream.
-    words_ = group_words(word_tokens_, ml_.config().tokenizer_pieces, frame_sec_f_);
-    if (words_.empty()) {
-        words_finalized_ = 0;
+    // Re-group ONLY the still-open tail [wt_cursor_, end) instead of the whole
+    // session every chunk. Tokens before wt_cursor_ are already grouped into
+    // final_words_ and can never change: group_words splits at `▁` word-starts
+    // and its only cross-token effects (the one-token forward lookahead and the
+    // backward punctuation attach) never cross a `▁`-word-start boundary — a
+    // word-start is never punctuation, and the tail's first token opens a word so
+    // no later punct attaches backwards past it. Hence
+    //   group_words([0,cursor)) ++ group_words([cursor,end)) == group_words([0,end))
+    // and final_words_ ++ tail == the full grouping, byte-for-byte. The last tail
+    // word stays "open" mid-stream (its text/end can still change); flush_all
+    // makes every word final at end-of-stream.
+    const auto& pieces = ml_.config().tokenizer_pieces;
+    std::vector<TokenInfo> tail(word_tokens_.begin() + (std::ptrdiff_t)wt_cursor_,
+                                word_tokens_.end());
+    std::vector<Word> tail_words = group_words(tail, pieces, frame_sec_f_);
+    reprocess_this_chunk_ += tail.size();
+
+    if (flush_all) {
+        for (const Word& w : tail_words) final_words_.push_back(w);
+        wt_cursor_ = word_tokens_.size();
+        words_ = final_words_;
+        words_finalized_ = words_.size();
     } else {
-        words_finalized_ = flush_all ? words_.size() : (words_.size() - 1);
+        // Move all tail words but the last into final_words_ and advance the
+        // cursor to the last `▁`-word-start in the tail (= the open word's start).
+        if (tail_words.size() > 1) {
+            size_t open_rel = 0;
+            for (size_t i = tail.size(); i-- > 0;) {
+                int32_t id = tail[i].id;
+                if (id >= 0 && (size_t)id < pieces.size() &&
+                    piece_starts_with_meta(pieces[(size_t)id])) {
+                    open_rel = i;
+                    break;
+                }
+            }
+            for (size_t i = 0; i + 1 < tail_words.size(); ++i)
+                final_words_.push_back(tail_words[i]);
+            wt_cursor_ += open_rel;
+        }
+        words_ = final_words_;
+        if (!tail_words.empty()) words_.push_back(tail_words.back());
+        words_finalized_ = words_.empty() ? 0 : words_.size() - 1;
     }
     // Never "un-finalize" a word we've already handed out.
     if (words_finalized_ < words_taken_) words_finalized_ = words_taken_;
