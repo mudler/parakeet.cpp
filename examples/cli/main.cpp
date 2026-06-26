@@ -17,8 +17,12 @@
 #include "mel_gpu.hpp"
 #include "ggml.h"
 #include "gguf.h"
+#include "transcription_json.hpp"
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
+#include <iterator>
 #include <memory>
 #include <algorithm>
 #include <cctype>
@@ -28,6 +32,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 static int cmd_info(const char* path) {
     pk::ModelLoader ml;
@@ -73,6 +81,40 @@ static int cmd_info(const char* path) {
     return 0;
 }
 
+static bool is_stdin_input(const std::string& input) {
+    return input == "-";
+}
+
+static std::string input_display_name(const std::string& input) {
+    return is_stdin_input(input) ? "stdin" : input;
+}
+
+static bool read_stdin_bytes(std::vector<unsigned char>& bytes) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    std::istreambuf_iterator<char> begin(std::cin);
+    std::istreambuf_iterator<char> end;
+    bytes.assign(begin, end);
+    return !bytes.empty() && !std::cin.bad();
+}
+
+static bool load_audio_arg_16k_mono(const std::string& input, pk::Audio& out) {
+    if (!is_stdin_input(input)) return pk::load_audio_16k_mono(input, out);
+
+    std::vector<unsigned char> bytes;
+    if (!read_stdin_bytes(bytes)) {
+        std::fprintf(stderr, "parakeet-cli: failed to read WAV bytes from stdin\n");
+        return false;
+    }
+    return pk::load_audio_16k_mono_from_memory(bytes.data(), bytes.size(), out);
+}
+
+static float model_frame_sec(const pk::Model& model) {
+    const pk::ParakeetConfig& cfg = model.config();
+    return (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
+}
+
 // Cache-aware streaming transcription for the EOU streaming model. Feeds the WAV
 // to a pk::StreamingSession in the model's exact chunk schedule, printing partial
 // text incrementally and `[EOU @ <t>s]` / `[EOB @ <t>s]` markers when events
@@ -94,8 +136,9 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
         return 1;
     }
     pk::Audio audio;
-    if (!pk::load_audio_16k_mono(input, audio)) {
-        std::fprintf(stderr, "parakeet-cli: failed to load audio %s\n", input.c_str());
+    if (!load_audio_arg_16k_mono(input, audio)) {
+        std::string display = input_display_name(input);
+        std::fprintf(stderr, "parakeet-cli: failed to load audio %s\n", display.c_str());
         return 1;
     }
 
@@ -148,7 +191,7 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
     return 0;
 }
 
-// parakeet-cli transcribe --model <m.gguf> --input <wav> [--decoder ctc|tdt]
+// parakeet-cli transcribe --model <m.gguf> --input <wav|-> [--decoder ctc|tdt]
 //                         [--stream]
 // Prints the transcript. Default decoder is chosen by arch (TDT for transducer
 // archs, CTC for ctc arch — matching NeMo's cur_decoder default). --stream uses
@@ -180,7 +223,7 @@ static int cmd_transcribe(int argc, char** argv) {
     }
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
-            "usage: parakeet-cli transcribe --model <m.gguf> --input <wav> "
+            "usage: parakeet-cli transcribe --model <m.gguf> --input <wav|-> "
             "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
             "[--threads N] [--json]\n");
         return 2;
@@ -221,6 +264,29 @@ static int cmd_transcribe(int argc, char** argv) {
 
     // --json: emit the C-API JSON document (text + word/token timestamps + conf).
     if (json) {
+        if (is_stdin_input(input)) {
+            pk::Audio audio;
+            if (!load_audio_arg_16k_mono(input, audio)) {
+                std::fprintf(stderr, "parakeet-cli: failed to load audio stdin\n");
+                return 1;
+            }
+            try {
+                std::unique_ptr<pk::Model> m = pk::Model::load(model);
+                if (!m) {
+                    std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+                    return 1;
+                }
+                pk::Transcription tr =
+                    m->transcribe_with_timestamps(audio.samples, audio.sample_rate, dec, lang);
+                std::string j = pk::transcription_to_json(tr, model_frame_sec(*m));
+                std::printf("%s\n", j.c_str());
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "parakeet-cli: transcribe failed: %s\n", e.what());
+                return 1;
+            }
+            return 0;
+        }
+
         parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
         if (!ctx) {
             std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -241,6 +307,11 @@ static int cmd_transcribe(int argc, char** argv) {
 
     // --timestamps: print one line per word `<start>-<end>  <word>  (<conf>)`.
     if (timestamps) {
+        pk::Audio audio;
+        if (is_stdin_input(input) && !load_audio_arg_16k_mono(input, audio)) {
+            std::fprintf(stderr, "parakeet-cli: failed to load audio stdin\n");
+            return 1;
+        }
         try {
             std::unique_ptr<pk::Model> m = pk::Model::load(model);
             if (!m) {
@@ -249,7 +320,9 @@ static int cmd_transcribe(int argc, char** argv) {
             }
             // `lang` (empty -> model default) selects the language prompt for
             // multilingual models; ignored by non-prompt models.
-            pk::Transcription tr = m->transcribe_path_with_timestamps(input, dec, lang);
+            pk::Transcription tr = is_stdin_input(input)
+                ? m->transcribe_with_timestamps(audio.samples, audio.sample_rate, dec, lang)
+                : m->transcribe_path_with_timestamps(input, dec, lang);
             for (const pk::Word& w : tr.words)
                 std::printf("%.2f-%.2f  %s  (%.2f)\n", w.start, w.end,
                             w.text.c_str(), w.conf);
@@ -264,7 +337,7 @@ static int cmd_transcribe(int argc, char** argv) {
     // language variant so the language prompt is selected (and an unknown locale
     // surfaces as a clean error). With no --lang keep the existing free-function
     // path so behavior for every other model is byte-for-byte unchanged.
-    if (!lang.empty()) {
+    if (!lang.empty() && !is_stdin_input(input)) {
         parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
         if (!ctx) {
             std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -285,7 +358,21 @@ static int cmd_transcribe(int argc, char** argv) {
 
     std::string text;
     try {
-        text = pk::transcribe(model, input, dec);
+        if (is_stdin_input(input)) {
+            pk::Audio audio;
+            if (!load_audio_arg_16k_mono(input, audio)) {
+                std::fprintf(stderr, "parakeet-cli: failed to load audio stdin\n");
+                return 1;
+            }
+            std::unique_ptr<pk::Model> m = pk::Model::load(model);
+            if (!m) {
+                std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+                return 1;
+            }
+            text = m->transcribe_pcm(audio.samples, audio.sample_rate, dec, lang);
+        } else {
+            text = pk::transcribe(model, input, dec);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "transcribe failed: %s\n", e.what());
         return 1;
@@ -473,7 +560,7 @@ static int cmd_quantize(int argc, char** argv) {
 // ---------------------------------------------------------------------------
 
 // Append `s` to `out` as a JSON string literal (quoted), escaping per RFC 8259.
-// Mirrors append_json_string in src/parakeet_capi.cpp (UTF-8 >= 0x80 passes
+// Mirrors append_json_string in src/transcription_json.cpp (UTF-8 >= 0x80 passes
 // through verbatim).
 static void bench_json_string(std::string& out, const std::string& s) {
     out += '"';
@@ -1176,7 +1263,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
         "usage:\n"
         "  parakeet-cli info <model.gguf>\n"
-        "  parakeet-cli transcribe --model <model.gguf> --input <wav> "
+        "  parakeet-cli transcribe --model <model.gguf> --input <wav|-> "
         "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
         "[--threads N] [--json]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "

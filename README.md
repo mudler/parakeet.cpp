@@ -233,6 +233,9 @@ parakeet-cli transcribe --model m.gguf --input audio.wav --timestamps
 #    "tokens":[{"id":..,"t":..,"conf":..}]}
 parakeet-cli transcribe --model m.gguf --input audio.wav --json
 
+# Read WAV bytes from stdin (useful with ffmpeg/curl pipelines)
+ffmpeg -i input.mp3 -f wav - | parakeet-cli transcribe --model m.gguf --input -
+
 # Print model metadata (arch, dims, mel params, vocab size, TDT durations)
 parakeet-cli info m.gguf
 

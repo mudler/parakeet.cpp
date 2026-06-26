@@ -22,19 +22,48 @@ std::vector<float> resample_linear(const std::vector<float>& in, int in_sr, int 
     return out;
 }
 
-bool load_audio_16k_mono(const std::string& path, Audio& out) {
-    unsigned int ch = 0, sr = 0; drwav_uint64 frames = 0;
-    float* pcm = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &frames, nullptr);
-    if (!pcm) { PK_LOG("failed to open wav: %s", path.c_str()); return false; }
+namespace {
+
+bool decode_pcm_16k_mono(float* pcm, unsigned int ch, unsigned int sr,
+                         drwav_uint64 frames, Audio& out, const char* source) {
+    if (!pcm) {
+        PK_LOG("failed to open wav: %s", source);
+        return false;
+    }
+    if (ch == 0 || sr == 0) {
+        PK_LOG("invalid wav metadata: %s", source);
+        return false;
+    }
     std::vector<float> mono(frames);
     for (drwav_uint64 i = 0; i < frames; ++i) {
         double acc = 0; for (unsigned int c = 0; c < ch; ++c) acc += pcm[i*ch + c];
-        mono[i] = (float)(acc / (ch ? ch : 1));
+        mono[i] = (float)(acc / ch);
     }
-    drwav_free(pcm, nullptr);
     out.samples = resample_linear(mono, (int)sr, 16000);
     out.sample_rate = 16000;
     return true;
+}
+
+} // namespace
+
+bool load_audio_16k_mono(const std::string& path, Audio& out) {
+    unsigned int ch = 0, sr = 0; drwav_uint64 frames = 0;
+    float* pcm = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &frames, nullptr);
+    const bool ok = decode_pcm_16k_mono(pcm, ch, sr, frames, out, path.c_str());
+    if (pcm) drwav_free(pcm, nullptr);
+    return ok;
+}
+
+bool load_audio_16k_mono_from_memory(const void* data, size_t size, Audio& out) {
+    if (!data || size == 0) {
+        PK_LOG("empty wav input");
+        return false;
+    }
+    unsigned int ch = 0, sr = 0; drwav_uint64 frames = 0;
+    float* pcm = drwav_open_memory_and_read_pcm_frames_f32(data, size, &ch, &sr, &frames, nullptr);
+    const bool ok = decode_pcm_16k_mono(pcm, ch, sr, frames, out, "memory");
+    if (pcm) drwav_free(pcm, nullptr);
+    return ok;
 }
 
 } // namespace pk

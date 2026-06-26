@@ -52,7 +52,7 @@ int main() {
     check(!contains(rvn.body, "\"words\":["), "verbose words gated off");
 
     // A NaN duration must not leak an invalid JSON literal (the fixed() guard
-    // emits 0, matching src/parakeet_capi.cpp's append_json_float).
+    // emits 0, matching src/transcription_json.cpp's append_json_float).
     Response rnan = format_transcription(tr, Format::kVerboseJson,
                                          std::nan(""), false);
     check(contains(rnan.body, "\"duration\":0"), "NaN duration -> 0");

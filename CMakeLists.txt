@@ -67,6 +67,7 @@ set(PARAKEET_SRC
     src/parakeet_capi.cpp
     src/common.cpp
     src/audio_io.cpp
+    src/transcription_json.cpp
     src/model_loader.cpp
     src/backend.cpp
     src/ggml_graph.cpp
