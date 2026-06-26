@@ -1161,6 +1161,11 @@ static int run_and_shutdown(int (*fn)(int, char**), int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && (std::strcmp(argv[1], "--version") == 0 ||
+                      std::strcmp(argv[1], "-V") == 0)) {
+        std::printf("parakeet-cli %s\n", parakeet_version());
+        return 0;
+    }
     if (argc >= 3 && std::strcmp(argv[1], "info") == 0)
         return run_and_shutdown([](int, char** a) { return cmd_info(a[0]); }, 1, argv + 2);
     if (argc >= 2 && std::strcmp(argv[1], "transcribe") == 0)

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(parakeet_cpp LANGUAGES C CXX)
 
+set(PARAKEET_VERSION "0.0.1" CACHE STRING "Version string returned by parakeet_version()")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -103,6 +105,7 @@ else()
 endif()
 target_include_directories(parakeet PUBLIC include PRIVATE src ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(parakeet PUBLIC $<$<CXX_COMPILER_ID:MSVC>:_USE_MATH_DEFINES>)
+target_compile_definitions(parakeet PRIVATE PARAKEET_VERSION="${PARAKEET_VERSION}")
 target_link_libraries(parakeet PUBLIC ggml)
 
 if(PARAKEET_BUILD_CLI)

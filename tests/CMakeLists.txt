@@ -66,6 +66,20 @@ pk_add_test(test_capi_stream_json)
 pk_add_test(test_capi_timestamps)
 pk_add_test(test_capi_batch_json)
 
+if(TARGET parakeet-cli)
+  add_test(NAME cli_version_long COMMAND $<TARGET_FILE:parakeet-cli> --version)
+  add_test(NAME cli_version_short COMMAND $<TARGET_FILE:parakeet-cli> -V)
+  set_tests_properties(cli_version_long cli_version_short
+                       PROPERTIES PASS_REGULAR_EXPRESSION "parakeet-cli ")
+endif()
+
+if(TARGET parakeet-server)
+  add_test(NAME server_version_long COMMAND $<TARGET_FILE:parakeet-server> --version)
+  add_test(NAME server_version_short COMMAND $<TARGET_FILE:parakeet-server> -V)
+  set_tests_properties(server_version_long server_version_short
+                       PROPERTIES PASS_REGULAR_EXPRESSION "parakeet-server ")
+endif()
+
 # Server example unit tests: compile the example's pure units directly
 # (they are not part of libparakeet). No model or network needed.
 add_executable(test_server_format test_server_format.cpp

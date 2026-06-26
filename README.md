@@ -111,6 +111,7 @@ cmake --build build-shared -j
 | `PARAKEET_BUILD_TESTS`   | OFF     | Compile and register ctest targets         |
 | `PARAKEET_BUILD_CLI`     | ON      | Build `parakeet-cli`                       |
 | `PARAKEET_SHARED`        | OFF     | Build libparakeet as a shared library      |
+| `PARAKEET_VERSION`       | 0.0.1   | Version string returned by `--version`     |
 | `PARAKEET_GGML_CUDA`     | OFF     | Forward GGML_CUDA to the submodule         |
 | `PARAKEET_GGML_METAL`    | OFF     | Forward GGML_METAL to the submodule        |
 | `PARAKEET_GGML_VULKAN`   | OFF     | Forward GGML_VULKAN to the submodule       |

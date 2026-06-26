@@ -97,10 +97,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install Vulkan SDK (LunarG, x64)
         if: matrix.backend == 'vulkan' && matrix.arch == 'x64'
@@ -148,6 +150,7 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
             ${EXTRA:+"$EXTRA"}
@@ -155,14 +158,19 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         # The CLI exits nonzero when invoked bare; capture first so set -e
         # only judges the grep.
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -206,6 +214,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
             ${EXTRA:+"$EXTRA"}
@@ -263,10 +272,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Configure
         run: |
@@ -277,19 +288,25 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         # The x64 binary needs Rosetta; only smoke test the native build.
         if: matrix.arch == 'arm64'
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -319,6 +336,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }}
 
       - name: Build (shared C-API lib)
@@ -378,10 +396,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Apply ggml patches (Git Bash)
         run: bash scripts/apply_ggml_patches.sh
@@ -418,20 +438,26 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 
       - name: Build
         run: cmake --build build -j
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         # The vulkan binary needs vulkan-1.dll, which the SDK install provides
         # on the runner; cpu and cuda load on a bare machine.
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli.exe 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli.exe --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server.exe --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server.exe --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -465,6 +491,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 
