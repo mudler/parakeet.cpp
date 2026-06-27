@@ -69,6 +69,9 @@ jobs:
         # PARAKEET_SERVER_E2E=1 flips the test from skip (77) to a real run.
         env:
           PARAKEET_SERVER_E2E: "1"
+          # First-run model download speed varies on hosted runners; the job
+          # timeout remains the outer cap.
+          PARAKEET_SERVER_E2E_READY_TIMEOUT: "600"
         run: ctest --test-dir build --output-on-failure -R '^server_e2e$'
 
   # -------------------------------------------------------------------------
