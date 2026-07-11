@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=parakeet-cli
+Comment=Fast on-device speech recognition (NVIDIA Parakeet on ggml)
+Exec=parakeet-cli
+Icon=parakeet-cli
+Terminal=true
+Categories=Utility;AudioVideo;

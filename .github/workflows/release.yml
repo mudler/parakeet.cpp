@@ -12,6 +12,10 @@ name: release
 # not need a lib directory). GGML_NATIVE=OFF keeps the binaries portable
 # across CPUs, same as the docker images and ci.yml.
 #
+# The linux cpu variants additionally ship as binary-only AppImages, built by
+# packaging/appimage/make-appimage.sh (the same script docker/Dockerfile.static
+# uses), so there is one grab-and-run file per arch alongside the tarballs.
+#
 # Variants:
 #   linux   x64: cpu, vulkan, cuda      arm64: cpu, vulkan
 #   macos   arm64: metal                x64: cpu (cross-compiled on the arm
@@ -193,6 +197,37 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.bundle }}
           path: ${{ steps.pack.outputs.bundle }}.tar.gz
+          if-no-files-found: error
+
+      # Binary-only AppImage from the same static cpu binary, packaged by the
+      # same script docker/Dockerfile.static uses. cpu-only: the vulkan/cuda
+      # binaries need system GPU stacks an AppImage can't sensibly bundle.
+      - name: Package AppImage
+        if: matrix.backend == 'cpu'
+        id: appimage
+        run: |
+          case "${{ matrix.arch }}" in
+            x64)   arch=x86_64 ;;
+            arm64) arch=aarch64 ;;
+          esac
+          packaging/appimage/make-appimage.sh \
+            build/examples/cli/parakeet-cli "$arch" "${{ steps.ver.outputs.version }}" .
+          echo "name=parakeet-cli-${{ steps.ver.outputs.version }}-${arch}.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test AppImage (version)
+        if: matrix.backend == 'cpu'
+        # EXTRACT_AND_RUN so the runner does not need FUSE.
+        run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
+          out=$(APPIMAGE_EXTRACT_AND_RUN=1 "./${{ steps.appimage.outputs.name }}" --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
+
+      - name: Upload AppImage artifact
+        if: matrix.backend == 'cpu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.appimage.outputs.name }}
+          path: ${{ steps.appimage.outputs.name }}
           if-no-files-found: error
 
       # Shared C-API lib (issue #25): a separate build so the CLI bundle above
