@@ -81,6 +81,16 @@ struct EncodedAudio {
     int frames = 0;
 };
 
+static void validate_nbest_request(const ParakeetConfig& cfg,
+                                   int beam_size, int nbest) {
+    if (cfg.tdt_durations.empty())
+        throw std::runtime_error(
+            "parakeet: N-best decoding requires a TDT duration table");
+    if (beam_size < 1 || nbest < 1 || nbest > beam_size)
+        throw std::invalid_argument(
+            "parakeet: require beam_size >= nbest >= 1");
+}
+
 // Shared single-clip frontend + encoder path. Keeping this in one helper makes
 // the opt-in N-best decoder consume exactly the same encoder output as greedy
 // and timestamped transcription.
@@ -468,9 +478,6 @@ std::vector<NBestTranscription> Model::transcribe_16k_nbest(
         const std::vector<float>& pcm16k, int beam_size, int nbest,
         bool score_norm, const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
-    if (cfg.tdt_durations.empty())
-        throw std::runtime_error(
-            "parakeet: N-best decoding requires a TDT duration table");
 
     const int prompt_index = resolve_prompt_index(target_lang);
     EncodedAudio encoded = encode_16k(loader_, pcm16k, prompt_index);
@@ -513,6 +520,7 @@ std::vector<NBestTranscription> Model::transcribe_pcm_nbest(
         const std::vector<float>& pcm, int sample_rate,
         int beam_size, int nbest, bool score_norm,
         const std::string& target_lang) const {
+    validate_nbest_request(loader_.config(), beam_size, nbest);
     if (sample_rate <= 0)
         throw std::runtime_error("parakeet: invalid sample_rate");
     if (sample_rate == 16000)
@@ -526,6 +534,7 @@ std::vector<NBestTranscription> Model::transcribe_pcm_nbest(
 std::vector<NBestTranscription> Model::transcribe_path_nbest(
         const std::string& wav_path, int beam_size, int nbest,
         bool score_norm, const std::string& target_lang) const {
+    validate_nbest_request(loader_.config(), beam_size, nbest);
     Audio audio;
     if (!load_audio_16k_mono(wav_path, audio))
         throw std::runtime_error(

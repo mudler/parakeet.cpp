@@ -232,14 +232,21 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
     const int token_count = joint.V_plus() - num_durations;
     if (token_count != joint.vocab_size() + 1 ||
         num_durations != joint.num_durations() ||
-        blank_id != token_count - 1) {
+        blank_id != token_count - 1 || blank_id < 1) {
         throw std::invalid_argument("tdt_beam_search: incompatible TDT head");
     }
 
     int zero_duration_idx = -1;
+    int zero_duration_count = 0;
     int min_nonzero_duration_idx = -1;
     for (int i = 0; i < num_durations; ++i) {
-        if (durations[i] == 0) zero_duration_idx = i;
+        if (durations[i] < 0)
+            throw std::invalid_argument(
+                "tdt_beam_search: durations must be non-negative");
+        if (durations[i] == 0) {
+            zero_duration_idx = i;
+            ++zero_duration_count;
+        }
         if (durations[i] > 0 &&
             (min_nonzero_duration_idx < 0 ||
              durations[i] < durations[min_nonzero_duration_idx])) {
@@ -249,6 +256,9 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
     if (min_nonzero_duration_idx < 0)
         throw std::invalid_argument(
             "tdt_beam_search: at least one positive duration is required");
+    if (zero_duration_count > 1)
+        throw std::invalid_argument(
+            "tdt_beam_search: at most one zero duration is allowed");
     if (T == 0)
         return {TdtBeamHypothesis{}};
 
@@ -303,9 +313,14 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
                 log_softmax(logits.data(), token_count);
             std::vector<float> duration_logp =
                 log_softmax(logits.data() + token_count, num_durations);
+            if (!std::all_of(token_logp.begin(), token_logp.end(),
+                             [](float value) { return std::isfinite(value); }) ||
+                !std::all_of(duration_logp.begin(), duration_logp.end(),
+                             [](float value) { return std::isfinite(value); })) {
+                throw std::runtime_error(
+                    "tdt_beam_search: non-finite log probability");
+            }
 
-            const std::vector<RankedIndex> best_tokens =
-                top_k(token_logp.data(), blank_id, token_beam);
             const std::vector<RankedIndex> best_durations =
                 top_k(duration_logp.data(), num_durations, duration_beam);
 
@@ -315,13 +330,18 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
                 int duration_idx;
             };
             std::vector<Pair> pairs;
+            const std::vector<RankedIndex> best_tokens =
+                top_k(token_logp.data(), blank_id, token_beam);
             pairs.reserve(best_tokens.size() * best_durations.size());
             for (const RankedIndex& duration : best_durations)
                 for (const RankedIndex& token : best_tokens)
                     pairs.push_back(Pair{
-                        duration.score + token.score, token.index, duration.index});
+                        duration.score + token.score,
+                        token.index,
+                        duration.index});
             std::partial_sort(
-                pairs.begin(), pairs.begin() + std::min(token_beam, (int)pairs.size()),
+                pairs.begin(),
+                pairs.begin() + std::min(token_beam, (int)pairs.size()),
                 pairs.end(),
                 [](const Pair& a, const Pair& b) {
                     if (a.score != b.score) return a.score > b.score;
@@ -335,6 +355,12 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
                 const int duration = durations[pair.duration_idx];
                 BeamState child = best;
                 child.hyp.score += pair.score;
+                if (duration == 0 &&
+                    !(child.hyp.score < best.hyp.score)) {
+                    throw std::runtime_error(
+                        "tdt_beam_search: zero-duration expansion "
+                        "did not reduce score");
+                }
                 child.hyp.tokens.push_back(TdtBeamToken{
                     (int32_t)pair.token, (int32_t)time_idx, (int32_t)duration});
                 child.dec_state = best.next_state;

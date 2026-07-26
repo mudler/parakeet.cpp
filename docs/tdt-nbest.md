@@ -16,11 +16,17 @@ greedy decoder.
 5. Sort by `score / (emitted_tokens + 1)` by default. The extra item is NeMo's
    leading blank/SOS sentinel.
 
+The C++ loop additionally rejects non-finite log probabilities and a
+zero-duration expansion that does not strictly reduce the accumulated score.
+This prevents malformed logits or floating-point saturation from creating a
+non-progress loop without truncating valid hypotheses.
+
 The implementation is limited to the default sequence-level TDT beam search.
 It does not add mAES/mALSD, an external language model, batched beam search, or
-streaming beam search. NeMo itself labels this strategy experimental and
-recommends `malsd_batch`; this first implementation deliberately prioritizes a
-small, directly comparable reference algorithm over a second decoder design.
+streaming beam search. [NeMo labels this strategy experimental and recommends
+`malsd_batch`](https://github.com/NVIDIA-NeMo/NeMo/blob/v2.7.3/nemo/collections/asr/parts/submodules/rnnt_decoding.py#L513-L533);
+this first implementation deliberately prioritizes a small, directly
+comparable reference algorithm over a second decoder design.
 
 ## CLI
 

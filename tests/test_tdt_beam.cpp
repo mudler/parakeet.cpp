@@ -1,3 +1,4 @@
+#include "audio_io.hpp"
 #include "ggml_graph.hpp"
 #include "model.hpp"
 #include "parakeet_capi.h"
@@ -217,6 +218,37 @@ int main() {
         }
     }
 
+    std::vector<pk::NBestTranscription> raw_ranked =
+        model->transcribe_path_nbest(
+            "tests/fixtures/speech.wav", beam_size, 2, false);
+    if (raw_ranked.empty() || raw_ranked.size() > 2) {
+        std::fprintf(stderr,
+                     "test_tdt_beam: invalid raw-ranked hypothesis count\n");
+        return 1;
+    }
+    for (size_t i = 1; i < raw_ranked.size(); ++i) {
+        if (raw_ranked[i - 1].score < raw_ranked[i].score) {
+            std::fprintf(stderr,
+                         "test_tdt_beam: hypotheses are not raw-score sorted\n");
+            return 1;
+        }
+    }
+
+    try {
+        (void)model->transcribe_path_nbest(
+            "tests/fixtures/does-not-exist.wav", 0, 1, true);
+        std::fprintf(stderr,
+                     "test_tdt_beam: invalid beam request unexpectedly succeeded\n");
+        return 1;
+    } catch (const std::invalid_argument& e) {
+        if (!std::strstr(e.what(), "beam_size")) {
+            std::fprintf(stderr,
+                         "test_tdt_beam: unexpected validation error: %s\n",
+                         e.what());
+            return 1;
+        }
+    }
+
     const char* baseline_path =
         std::getenv("PARAKEET_TEST_TDT_NBEST_BASELINE");
     if (baseline_path &&
@@ -242,6 +274,36 @@ int main() {
         return 1;
     }
     parakeet_capi_free_string(json);
+
+    pk::Audio audio;
+    if (!pk::load_audio_16k_mono("tests/fixtures/speech.wav", audio)) {
+        std::fprintf(stderr, "test_tdt_beam: failed to load PCM fixture\n");
+        parakeet_capi_free(ctx);
+        return 1;
+    }
+    char* pcm_json = parakeet_capi_transcribe_pcm_nbest_json(
+        ctx, audio.samples.data(), (int)audio.samples.size(), audio.sample_rate,
+        beam_size, 2, 0, nullptr);
+    if (!pcm_json ||
+        !std::strstr(pcm_json, "\"score_norm\":false") ||
+        !std::strstr(pcm_json, "\"hypotheses\":[")) {
+        std::fprintf(stderr, "test_tdt_beam: invalid PCM C API JSON: %s\n",
+                     pcm_json ? pcm_json : parakeet_capi_last_error(ctx));
+        parakeet_capi_free_string(pcm_json);
+        parakeet_capi_free(ctx);
+        return 1;
+    }
+    parakeet_capi_free_string(pcm_json);
+
+    char* invalid = parakeet_capi_transcribe_path_nbest_json(
+        ctx, "tests/fixtures/does-not-exist.wav", 0, 1, 1, nullptr);
+    if (invalid || !std::strstr(parakeet_capi_last_error(ctx), "beam_size")) {
+        std::fprintf(stderr,
+                     "test_tdt_beam: C API validation did not fail early\n");
+        parakeet_capi_free_string(invalid);
+        parakeet_capi_free(ctx);
+        return 1;
+    }
     parakeet_capi_free(ctx);
     return 0;
 }

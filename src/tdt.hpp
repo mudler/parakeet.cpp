@@ -86,6 +86,10 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
 //   * duplicate (token sequence, last frame) paths are merged with logaddexp;
 //   * final hypotheses are sorted by normalized score by default.
 //
+// A zero-duration expansion must strictly reduce the accumulated log score.
+// Rejecting non-finite or non-decreasing scores prevents a malformed model from
+// creating a non-progress loop without truncating valid hypotheses.
+//
 // This is an opt-in offline decoder. The existing tdt_greedy path is not used
 // or modified. `beam_size` and `nbest` must be positive, with nbest <=
 // beam_size. At most `nbest` hypotheses are returned.
