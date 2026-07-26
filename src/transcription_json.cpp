@@ -1,4 +1,5 @@
 #include "transcription_json.hpp"
+#include "model.hpp"
 
 #include <cstdio>
 
@@ -86,6 +87,49 @@ std::string transcription_to_json(const Transcription& tr, float frame_sec) {
         out += ",\"conf\":";
         append_json_float(out, "%.4f", tr.tokens[i].conf);
         out += '}';
+    }
+    out += "]}";
+    return out;
+}
+
+std::string nbest_transcriptions_to_json(
+    const std::vector<NBestTranscription>& hypotheses,
+    int beam_size, bool score_norm, float frame_sec) {
+    std::string out;
+    out.reserve(96 + hypotheses.size() * 160);
+    out += "{\"beam_size\":";
+    append_json_int(out, beam_size);
+    out += ",\"score_norm\":";
+    out += score_norm ? "true" : "false";
+    out += ",\"frame_sec\":";
+    append_json_float(out, "%.6f", frame_sec);
+    out += ",\"hypotheses\":[";
+    for (size_t i = 0; i < hypotheses.size(); ++i) {
+        if (i) out += ',';
+        const NBestTranscription& hyp = hypotheses[i];
+        out += "{\"text\":";
+        append_json_string(out, hyp.text);
+        out += ",\"score\":";
+        append_json_float(out, "%.6f", hyp.score);
+        out += ",\"normalized_score\":";
+        append_json_float(out, "%.6f", hyp.normalized_score);
+        out += ",\"tokens\":[";
+        for (size_t j = 0; j < hyp.tokens.size(); ++j) {
+            if (j) out += ',';
+            const TdtBeamToken& token = hyp.tokens[j];
+            out += "{\"id\":";
+            append_json_int(out, token.id);
+            out += ",\"frame\":";
+            append_json_int(out, token.frame);
+            out += ",\"t\":";
+            append_json_float(out, "%.3f", (float)token.frame * frame_sec);
+            out += ",\"duration_frames\":";
+            append_json_int(out, token.duration);
+            out += ",\"duration\":";
+            append_json_float(out, "%.3f", (float)token.duration * frame_sec);
+            out += '}';
+        }
+        out += "]}";
     }
     out += "]}";
     return out;

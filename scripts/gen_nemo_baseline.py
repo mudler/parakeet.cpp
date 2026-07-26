@@ -83,6 +83,14 @@ TDT greedy ground truth (Phase 3; ``m`` with the transducer/TDT head selected):
                                             ``m.transcribe([audio])``. May be
                                             length-0 for a silent / tone clip.
 
+Optional TDT N-best ground truth (``--tdt-beam-size N``):
+
+* ``tdt_nbest_offsets``          ``[N+1]`` int32   ragged-hypothesis offsets
+* ``tdt_nbest_token_ids``        ``[sum L]`` int32 flattened token ids
+* ``tdt_nbest_token_end_frames`` ``[sum L]`` int32 NeMo token end frames
+* ``tdt_nbest_scores``           ``[N]`` f32       raw hypothesis scores
+* ``baseline.tdt_nbest_texts_json`` str           decoded texts as JSON
+
 String KVs:
 
 * ``baseline.detok_text``  detokenized text for the ``detok_ids`` fixture
@@ -441,6 +449,62 @@ def _timestamps_decoding_cfg(m):
     return cfg
 
 
+def _dump_tdt_nbest(m, audio, beam_size):
+    """Run NeMo's default TDT beam search and return flat parity arrays."""
+    import copy
+    from omegaconf import open_dict
+
+    m.change_decoding_strategy(decoder_type="rnnt")
+    cfg = copy.deepcopy(m.cfg.decoding)
+    with open_dict(cfg):
+        cfg.strategy = "beam"
+        cfg.compute_timestamps = False
+        cfg.preserve_alignments = False
+        cfg.beam.beam_size = beam_size
+        cfg.beam.score_norm = True
+        cfg.beam.return_best_hypothesis = False
+    m.change_decoding_strategy(cfg, decoder_type="rnnt")
+
+    with torch.no_grad():
+        out = m.transcribe(
+            [audio], batch_size=1, return_hypotheses=True
+        )
+    samples = out[0] if isinstance(out, tuple) else out
+    hypotheses = samples[0]
+    if not isinstance(hypotheses, list):
+        hypotheses = [hypotheses]
+    hypotheses = hypotheses[:beam_size]
+
+    offsets = [0]
+    token_ids = []
+    token_end_frames = []
+    scores = []
+    texts = []
+    for hyp in hypotheses:
+        ids = hyp.y_sequence
+        ids = ids.cpu().tolist() if hasattr(ids, "cpu") else list(ids)
+        ends = hyp.timestamp
+        ends = ends.cpu().tolist() if hasattr(ends, "cpu") else list(ends)
+        if len(ids) != len(ends):
+            raise RuntimeError(
+                "NeMo TDT N-best token/timestamp length mismatch: "
+                f"{len(ids)} != {len(ends)}"
+            )
+        token_ids.extend(int(x) for x in ids)
+        token_end_frames.extend(int(x) for x in ends)
+        offsets.append(len(token_ids))
+        scores.append(float(hyp.score))
+        texts.append(hyp.text if hasattr(hyp, "text") else str(hyp))
+
+    return {
+        "offsets": np.asarray(offsets, dtype=np.int32),
+        "token_ids": np.asarray(token_ids, dtype=np.int32),
+        "token_end_frames": np.asarray(token_end_frames, dtype=np.int32),
+        "scores": np.asarray(scores, dtype=np.float32),
+        "texts": texts,
+    }
+
+
 def _dump_head_timestamps(m, audio, decoder_type, blank_id):
     """Run one decoding head with timestamps+confidence and extract the per-token
     ``{id, frame, conf}`` arrays plus the per-word ``{w, start, end, conf}`` list.
@@ -710,7 +774,16 @@ def main():
         default=None,
         help="target_lang for prompt models (default: model default / auto)",
     )
+    ap.add_argument(
+        "--tdt-beam-size",
+        type=int,
+        default=0,
+        help="also dump NeMo default TDT N-best parity tensors using this "
+        "beam size (0 disables; intended for beam decoder tests)",
+    )
     args = ap.parse_args()
+    if args.tdt_beam_size < 0:
+        ap.error("--tdt-beam-size must be >= 0")
 
     is_local = pathlib.Path(args.model).exists()
     try:
@@ -1037,6 +1110,11 @@ def main():
         y_seq = y_seq.cpu().tolist()
     tdt_token_ids = np.array(list(y_seq), dtype=np.int32)
     tdt_text = tdt_first.text if hasattr(tdt_first, "text") else str(tdt_first)
+    tdt_nbest = (
+        _dump_tdt_nbest(m, args.audio, args.tdt_beam_size)
+        if args.tdt_beam_size > 0
+        else None
+    )
 
     # Tokenizer detok fixture: a small hand-picked set of regular BPE ids
     # (avoid id=0 <unk> and blank_id=1024 which is beyond vocab).
@@ -1071,6 +1149,28 @@ def main():
     w.add_uint32("baseline.tdt_token_count", int(tdt_token_ids.shape[0]))
     if tdt_token_ids.shape[0] > 0:
         w.add_tensor("tdt_token_ids", np.ascontiguousarray(tdt_token_ids))
+    if tdt_nbest is not None:
+        w.add_uint32("baseline.tdt_nbest_beam_size", args.tdt_beam_size)
+        w.add_uint32(
+            "baseline.tdt_nbest_count", int(tdt_nbest["scores"].shape[0])
+        )
+        w.add_tensor(
+            "tdt_nbest_offsets", np.ascontiguousarray(tdt_nbest["offsets"])
+        )
+        w.add_tensor(
+            "tdt_nbest_token_ids", np.ascontiguousarray(tdt_nbest["token_ids"])
+        )
+        w.add_tensor(
+            "tdt_nbest_token_end_frames",
+            np.ascontiguousarray(tdt_nbest["token_end_frames"]),
+        )
+        w.add_tensor(
+            "tdt_nbest_scores", np.ascontiguousarray(tdt_nbest["scores"])
+        )
+        w.add_string(
+            "baseline.tdt_nbest_texts_json",
+            json.dumps(tdt_nbest["texts"], ensure_ascii=False),
+        )
     w.add_string("baseline.detok_text", detok_text)
     w.add_string("baseline.ctc_text", ctc_text)
     w.add_string("baseline.tdt_text", tdt_text)
@@ -1086,11 +1186,25 @@ def main():
     shapes["joint_enc_frames"] = tuple(joint_enc_frames_arr.shape)
     if tdt_token_ids.shape[0] > 0:
         shapes["tdt_token_ids"] = tuple(tdt_token_ids.shape)
+    if tdt_nbest is not None:
+        for name in (
+            "offsets",
+            "token_ids",
+            "token_end_frames",
+            "scores",
+        ):
+            shapes[f"tdt_nbest_{name}"] = tuple(tdt_nbest[name].shape)
     print("baseline tensors:", shapes)
     print(f"baseline.detok_text: {repr(detok_text)}")
     print(f"baseline.ctc_text: {repr(ctc_text)}")
     print(f"baseline.tdt_text: {repr(tdt_text)}")
     print(f"tdt_token_ids ({tdt_token_ids.shape[0]}): {tdt_token_ids.tolist()}")
+    if tdt_nbest is not None:
+        print(
+            f"tdt_nbest beam={args.tdt_beam_size}: "
+            f"scores={tdt_nbest['scores'].tolist()} "
+            f"texts={tdt_nbest['texts']!r}"
+        )
     print(
         f"transducer: pred_input_ids={pred_input_ids.tolist()} add_sos={add_sos} "
         f"U+1={shapes['pred_out'][0]} sos_embed_zero={sos_embed_is_zero} "

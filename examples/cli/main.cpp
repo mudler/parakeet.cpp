@@ -201,6 +201,9 @@ static int cmd_transcribe(int argc, char** argv) {
     bool stream = false;
     bool timestamps = false;
     bool json = false;
+    bool score_norm = true;
+    int beam_size = 0;
+    int nbest = 0;
     int threads = 0;  // 0 == unset -> use the persistent-backend default
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -219,13 +222,20 @@ static int cmd_transcribe(int argc, char** argv) {
             threads = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--json") == 0) {
             json = true;
+        } else if (std::strcmp(argv[i], "--beam-size") == 0 && i + 1 < argc) {
+            beam_size = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--nbest") == 0 && i + 1 < argc) {
+            nbest = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--no-score-norm") == 0) {
+            score_norm = false;
         }
     }
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
             "usage: parakeet-cli transcribe --model <m.gguf> --input <wav|-> "
             "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
-            "[--threads N] [--json]\n");
+            "[--threads N] [--json] "
+            "[--beam-size N [--nbest N] [--no-score-norm]]\n");
         return 2;
     }
     // Apply the thread override (offline + streaming graph compute). When unset
@@ -233,6 +243,11 @@ static int cmd_transcribe(int argc, char** argv) {
     if (threads > 0) pk::set_num_threads(threads);
 
     if (stream) {
+        if (beam_size != 0 || nbest != 0) {
+            std::fprintf(stderr,
+                "parakeet-cli: --beam-size/--nbest are offline TDT only\n");
+            return 2;
+        }
         if (!decoder_str.empty()) {
             std::fprintf(stderr,
                 "parakeet-cli: --stream is RNN-T only; --decoder is ignored\n");
@@ -260,6 +275,89 @@ static int cmd_transcribe(int argc, char** argv) {
                          decoder_str.c_str());
             return 2;
         }
+    }
+
+    if (nbest != 0 && beam_size == 0) {
+        std::fprintf(stderr,
+            "parakeet-cli: --nbest requires --beam-size\n");
+        return 2;
+    }
+    if (!score_norm && beam_size == 0) {
+        std::fprintf(stderr,
+            "parakeet-cli: --no-score-norm requires --beam-size\n");
+        return 2;
+    }
+    if (beam_size != 0) {
+        if (beam_size < 1) {
+            std::fprintf(stderr,
+                "parakeet-cli: --beam-size must be at least 1\n");
+            return 2;
+        }
+        if (nbest == 0) nbest = beam_size;
+        if (nbest < 1 || nbest > beam_size) {
+            std::fprintf(stderr,
+                "parakeet-cli: require beam-size >= nbest >= 1\n");
+            return 2;
+        }
+        if (decoder_str == "ctc") {
+            std::fprintf(stderr,
+                "parakeet-cli: TDT N-best cannot use --decoder ctc\n");
+            return 2;
+        }
+        if (timestamps) {
+            std::fprintf(stderr,
+                "parakeet-cli: --timestamps is redundant with N-best JSON\n");
+            return 2;
+        }
+
+        if (is_stdin_input(input)) {
+            pk::Audio audio;
+            if (!load_audio_arg_16k_mono(input, audio)) {
+                std::fprintf(stderr, "parakeet-cli: failed to load audio stdin\n");
+                return 1;
+            }
+            try {
+                std::unique_ptr<pk::Model> m = pk::Model::load(model);
+                if (!m) {
+                    std::fprintf(stderr,
+                        "parakeet-cli: failed to load model %s\n", model.c_str());
+                    return 1;
+                }
+                std::vector<pk::NBestTranscription> hypotheses =
+                    m->transcribe_pcm_nbest(
+                        audio.samples, audio.sample_rate,
+                        beam_size, nbest, score_norm, lang);
+                std::string output = pk::nbest_transcriptions_to_json(
+                    hypotheses, beam_size, score_norm, model_frame_sec(*m));
+                std::printf("%s\n", output.c_str());
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                    "parakeet-cli: N-best transcription failed: %s\n", e.what());
+                return 1;
+            }
+            return 0;
+        }
+
+        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        if (!ctx) {
+            std::fprintf(stderr,
+                "parakeet-cli: failed to load model %s\n", model.c_str());
+            return 1;
+        }
+        char* output = parakeet_capi_transcribe_path_nbest_json(
+            ctx, input.c_str(), beam_size, nbest, score_norm ? 1 : 0,
+            lang.empty() ? nullptr : lang.c_str());
+        if (!output) {
+            std::fprintf(stderr,
+                "parakeet-cli: N-best transcription failed: %s\n",
+                parakeet_capi_last_error(ctx));
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        std::printf("%s\n", output);
+        parakeet_capi_free_string(output);
+        parakeet_capi_free(ctx);
+        return 0;
     }
 
     // --json: emit the C-API JSON document (text + word/token timestamps + conf).
@@ -1270,7 +1368,8 @@ int main(int argc, char** argv) {
         "  parakeet-cli info <model.gguf>\n"
         "  parakeet-cli transcribe --model <model.gguf> --input <wav|-> "
         "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
-        "[--threads N] [--json]\n"
+        "[--threads N] [--json] "
+        "[--beam-size N [--nbest N] [--no-score-norm]]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "
         "<q4_0|q5_0|q8_0|q4_k|q5_k|q6_k>\n"
         "  parakeet-cli bench --model <model.gguf> --manifest <file> "

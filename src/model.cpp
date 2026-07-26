@@ -75,6 +75,57 @@ static void maybe_apply_prompt(const ModelLoader& loader, std::vector<float>& en
     enc_out.swap(projected);
 }
 
+struct EncodedAudio {
+    std::vector<float> channels_first;
+    int d_model = 0;
+    int frames = 0;
+};
+
+// Shared single-clip frontend + encoder path. Keeping this in one helper makes
+// the opt-in N-best decoder consume exactly the same encoder output as greedy
+// and timestamped transcription.
+static EncodedAudio encode_16k(const ModelLoader& loader,
+                               const std::vector<float>& pcm16k,
+                               int prompt_index) {
+    const ParakeetConfig& cfg = loader.config();
+
+    std::vector<float> feats;
+    int n_mels = 0, T = 0;
+    if (std::string(pk::global_backend().device_name()) != "cpu") {
+        GpuMel gmel(loader);
+        gmel.compute(pcm16k, feats, n_mels, T);
+    } else {
+        MelFrontend mel(loader);
+        mel.compute(pcm16k, feats, n_mels, T);
+    }
+
+    Encoder encoder(loader);
+    EncodedAudio encoded;
+    const int sub_tile = subsampling_tile_for(cfg, loader, T);
+    if (sub_tile > 0) {
+        MelBatch mb1;
+        mb1.B = 1;
+        mb1.n_mels = n_mels;
+        mb1.T_max = T;
+        mb1.valid_T = {T};
+        mb1.data = feats;
+        std::vector<std::vector<float>> outputs;
+        std::vector<int> valid_frames;
+        int padded_frames = 0;
+        encoder.forward_batch_tiled(
+            mb1, outputs, encoded.d_model, padded_frames, valid_frames, sub_tile);
+        encoded.channels_first = std::move(outputs[0]);
+        encoded.frames = valid_frames[0];
+    } else {
+        encoder.forward(feats, n_mels, T, encoded.channels_first,
+                        encoded.d_model, encoded.frames);
+    }
+
+    maybe_apply_prompt(loader, encoded.channels_first,
+                       encoded.d_model, encoded.frames, prompt_index);
+    return encoded;
+}
+
 // Decode one item's encoder output (row-major [d_model, Tout], channels-first)
 // into a transcript. Mirrors the tail of transcribe_16k exactly.
 static std::string decode_enc_out(const ModelLoader& loader,
@@ -112,52 +163,14 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
                                   const std::string& target_lang) const {
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
-
-    // 1. Log-mel front end -> feats [n_mels, T]. On a non-CPU backend run the
-    //    heavy STFT/power/filterbank/log on the backend (GPU) via GpuMel; on CPU
-    //    keep the byte-identical FFT-based MelFrontend.
-    std::vector<float> feats;
-    int n_mels = 0, T = 0;
-    if (std::string(pk::global_backend().device_name()) != "cpu") {
-        GpuMel gmel(loader_);
-        gmel.compute(pcm16k, feats, n_mels, T);
-    } else {
-        MelFrontend mel(loader_);
-        mel.compute(pcm16k, feats, n_mels, T);
-    }
-
-    // 2. FastConformer encoder -> enc_out [d_model, Tout] (channels-first).
-    Encoder encoder(loader_);
-    std::vector<float> enc_out;
-    int d_model = 0, Tout = 0;
-    // Long audio: the single-clip forward() would overflow ggml's 2^31 subsampling
-    // limit. Delegate to the tiled batched path with a 1-item batch (faithful,
-    // reuses forward_batch_tiled). Short audio keeps the fused single-clip path.
-    const int sub_tile = subsampling_tile_for(cfg, loader_, T);
-    if (sub_tile > 0) {
-        MelBatch mb1;
-        mb1.B = 1; mb1.n_mels = n_mels; mb1.T_max = T; mb1.valid_T = { T };
-        mb1.data = feats;   // feats is [n_mels,T] = the B=1 batch buffer
-        std::vector<std::vector<float>> eo; std::vector<int> vT;
-        int dm1 = 0, To1 = 0;
-        encoder.forward_batch_tiled(mb1, eo, dm1, To1, vT, sub_tile);
-        enc_out = std::move(eo[0]);   // channels-first [d_model, vT[0]]
-        d_model = dm1;
-        Tout = vT[0];
-    } else {
-        encoder.forward(feats, n_mels, T, enc_out, d_model, Tout);
-    }
-
-    // 2b. Prompt conditioning (multilingual nemotron): project the encoder
-    //     output with the selected language one-hot before decoding. No-op for
-    //     other models (prompt.present == false).
-    maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
+    EncodedAudio encoded = encode_16k(loader_, pcm16k, prompt_index);
 
     // Decide which head to use.
     const bool use_tdt = (decoder == Decoder::kTDT)
         || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
 
-    return decode_enc_out(loader_, enc_out, d_model, Tout, use_tdt);
+    return decode_enc_out(loader_, encoded.channels_first,
+                          encoded.d_model, encoded.frames, use_tdt);
 }
 
 // Max mel frames per encoder pass before the first subsampling conv output
@@ -365,50 +378,14 @@ Transcription Model::transcribe_16k_with_timestamps(
     // hop_length / sample_rate).
     const float frame_sec =
         (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
-
-    // 1. Log-mel front end -> feats [n_mels, T]. On a non-CPU backend run the
-    //    heavy STFT/power/filterbank/log on the backend (GPU) via GpuMel; on CPU
-    //    keep the byte-identical FFT-based MelFrontend.
-    std::vector<float> feats;
-    int n_mels = 0, T = 0;
-    if (std::string(pk::global_backend().device_name()) != "cpu") {
-        GpuMel gmel(loader_);
-        gmel.compute(pcm16k, feats, n_mels, T);
-    } else {
-        MelFrontend mel(loader_);
-        mel.compute(pcm16k, feats, n_mels, T);
-    }
-
-    // 2. FastConformer encoder -> enc_out [d_model, Tout] (channels-first).
-    Encoder encoder(loader_);
-    std::vector<float> enc_out;
-    int d_model = 0, Tout = 0;
-    // Long audio: the single-clip forward() would overflow ggml's 2^31 subsampling
-    // limit. Delegate to the tiled batched path with a 1-item batch (faithful,
-    // reuses forward_batch_tiled). Short audio keeps the fused single-clip path.
-    const int sub_tile = subsampling_tile_for(cfg, loader_, T);
-    if (sub_tile > 0) {
-        MelBatch mb1;
-        mb1.B = 1; mb1.n_mels = n_mels; mb1.T_max = T; mb1.valid_T = { T };
-        mb1.data = feats;   // feats is [n_mels,T] = the B=1 batch buffer
-        std::vector<std::vector<float>> eo; std::vector<int> vT;
-        int dm1 = 0, To1 = 0;
-        encoder.forward_batch_tiled(mb1, eo, dm1, To1, vT, sub_tile);
-        enc_out = std::move(eo[0]);   // channels-first [d_model, vT[0]]
-        d_model = dm1;
-        Tout = vT[0];
-    } else {
-        encoder.forward(feats, n_mels, T, enc_out, d_model, Tout);
-    }
-
-    // 2b. Prompt conditioning (nemotron): project before decode. No-op otherwise.
-    maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
+    EncodedAudio encoded = encode_16k(loader_, pcm16k, prompt_index);
 
     const bool use_tdt = (decoder == Decoder::kTDT)
         || (decoder == Decoder::kDefault && arch_prefers_tdt(cfg.arch));
 
     Transcription result = decode_enc_out_with_timestamps(
-        loader_, enc_out, d_model, Tout, use_tdt, frame_sec);
+        loader_, encoded.channels_first, encoded.d_model, encoded.frames,
+        use_tdt, frame_sec);
     return result;
 }
 
@@ -485,6 +462,76 @@ std::vector<Transcription> Model::transcribe_pcm_batch_with_timestamps(
         r[i] = (sample_rate == 16000) ? pcms[i]
                                       : resample_linear(pcms[i], sample_rate, 16000);
     return transcribe_16k_batch_with_timestamps(r, decoder, target_lang);
+}
+
+std::vector<NBestTranscription> Model::transcribe_16k_nbest(
+        const std::vector<float>& pcm16k, int beam_size, int nbest,
+        bool score_norm, const std::string& target_lang) const {
+    const ParakeetConfig& cfg = loader_.config();
+    if (cfg.tdt_durations.empty())
+        throw std::runtime_error(
+            "parakeet: N-best decoding requires a TDT duration table");
+
+    const int prompt_index = resolve_prompt_index(target_lang);
+    EncodedAudio encoded = encode_16k(loader_, pcm16k, prompt_index);
+
+    std::vector<float> enc_row(
+        (size_t)encoded.frames * encoded.d_model);
+    for (int t = 0; t < encoded.frames; ++t)
+        for (int c = 0; c < encoded.d_model; ++c)
+            enc_row[(size_t)t * encoded.d_model + c] =
+                encoded.channels_first[(size_t)c * encoded.frames + t];
+
+    PredictionNet pred(loader_);
+    Joint joint(loader_);
+    std::vector<TdtBeamHypothesis> beam = tdt_beam_search(
+        pred, joint, enc_row, encoded.frames, encoded.d_model,
+        cfg.tdt_durations, (int)cfg.blank_id,
+        beam_size, nbest, score_norm);
+
+    std::vector<NBestTranscription> result;
+    result.reserve(beam.size());
+    for (TdtBeamHypothesis& hyp : beam) {
+        std::vector<int32_t> ids;
+        ids.reserve(hyp.tokens.size());
+        for (const TdtBeamToken& token : hyp.tokens)
+            ids.push_back(token.id);
+
+        NBestTranscription item;
+        item.text = detokenize(
+            loader_.tokenizer_pieces(),
+            strip_special_tokens(loader_.tokenizer_pieces(), ids));
+        item.tokens = std::move(hyp.tokens);
+        item.score = hyp.score;
+        item.normalized_score = hyp.normalized_score;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
+std::vector<NBestTranscription> Model::transcribe_pcm_nbest(
+        const std::vector<float>& pcm, int sample_rate,
+        int beam_size, int nbest, bool score_norm,
+        const std::string& target_lang) const {
+    if (sample_rate <= 0)
+        throw std::runtime_error("parakeet: invalid sample_rate");
+    if (sample_rate == 16000)
+        return transcribe_16k_nbest(
+            pcm, beam_size, nbest, score_norm, target_lang);
+    return transcribe_16k_nbest(
+        resample_linear(pcm, sample_rate, 16000),
+        beam_size, nbest, score_norm, target_lang);
+}
+
+std::vector<NBestTranscription> Model::transcribe_path_nbest(
+        const std::string& wav_path, int beam_size, int nbest,
+        bool score_norm, const std::string& target_lang) const {
+    Audio audio;
+    if (!load_audio_16k_mono(wav_path, audio))
+        throw std::runtime_error(
+            "parakeet: failed to load audio: " + wav_path);
+    return transcribe_16k_nbest(
+        audio.samples, beam_size, nbest, score_norm, target_lang);
 }
 
 std::string Model::transcribe_pcm(const std::vector<float>& pcm, int sample_rate,

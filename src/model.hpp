@@ -1,6 +1,7 @@
 #pragma once
 #include "parakeet.h"          // pk::Decoder
 #include "model_loader.hpp"
+#include "tdt.hpp"             // pk::TdtBeamToken
 #include "transcription.hpp"   // pk::Transcription
 
 #include <memory>
@@ -8,6 +9,14 @@
 #include <vector>
 
 namespace pk {
+
+// One text hypothesis returned by the opt-in offline TDT N-best path.
+struct NBestTranscription {
+    std::string text;
+    std::vector<TdtBeamToken> tokens;
+    float score = 0.0f;
+    float normalized_score = 0.0f;
+};
 
 // Load-once transcription context.
 //
@@ -76,6 +85,19 @@ public:
         Decoder decoder = Decoder::kDefault,
         const std::string& target_lang = "") const;
 
+    // Offline TDT beam search. These methods are intentionally separate from
+    // the greedy Decoder selector: they require a TDT duration table and return
+    // up to `nbest` ranked hypotheses with token emission frames/durations.
+    std::vector<NBestTranscription> transcribe_pcm_nbest(
+        const std::vector<float>& pcm, int sample_rate,
+        int beam_size, int nbest, bool score_norm = true,
+        const std::string& target_lang = "") const;
+
+    std::vector<NBestTranscription> transcribe_path_nbest(
+        const std::string& wav_path,
+        int beam_size, int nbest, bool score_norm = true,
+        const std::string& target_lang = "") const;
+
     // Batched timestamped transcription. Each clip is resampled to 16 kHz if
     // needed, all run through the batched encoder; decode + timestamp extraction
     // are per item. Returns one Transcription per input, in order.
@@ -114,6 +136,10 @@ private:
     Transcription transcribe_16k_with_timestamps(
         const std::vector<float>& pcm16k, Decoder decoder,
         const std::string& target_lang = "") const;
+
+    std::vector<NBestTranscription> transcribe_16k_nbest(
+        const std::vector<float>& pcm16k, int beam_size, int nbest,
+        bool score_norm, const std::string& target_lang) const;
 
     ModelLoader loader_;
 };

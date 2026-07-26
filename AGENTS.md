@@ -311,6 +311,13 @@ Used by Phase 1 parity tests.  Requires the venv and a 16 kHz mono WAV.
     --model nvidia/parakeet-tdt_ctc-110m \
     --audio tests/fixtures/speech.wav \
     --output /tmp/baseline_speech.gguf
+
+# Optional TDT beam/N-best parity data:
+.venv/bin/python scripts/gen_nemo_baseline.py \
+    --model nvidia/parakeet-tdt_ctc-110m \
+    --audio tests/fixtures/speech.wav \
+    --tdt-beam-size 4 \
+    --output /tmp/tdt_nbest_baseline.gguf
 ```
 
 ## Publishing models to HuggingFace

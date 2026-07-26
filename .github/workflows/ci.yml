@@ -100,7 +100,7 @@ jobs:
   closed-loop:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -138,6 +138,21 @@ jobs:
           .venv/bin/python scripts/convert_parakeet_to_gguf.py \
             --model nvidia/parakeet-tdt_ctc-110m \
             --output /tmp/pk110m_cl.gguf
+
+      - name: Generate NeMo TDT N-best reference
+        run: |
+          .venv/bin/python scripts/gen_nemo_baseline.py \
+            --model nvidia/parakeet-tdt_ctc-110m \
+            --audio tests/fixtures/speech.wav \
+            --tdt-beam-size 4 \
+            --output /tmp/tdt_nbest_baseline.gguf
+
+      - name: Assert TDT N-best parity with NeMo
+        env:
+          PARAKEET_TEST_GGUF: /tmp/pk110m_cl.gguf
+          PARAKEET_TEST_TDT_NBEST_BASELINE: /tmp/tdt_nbest_baseline.gguf
+        run: |
+          ctest --test-dir build --output-on-failure -R '^test_tdt_beam$'
 
       - name: Transcribe speech fixture with TDT decoder
         run: |

@@ -342,6 +342,87 @@ extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
                                                         nullptr);
 }
 
+extern "C" char* parakeet_capi_transcribe_path_nbest_json(
+        parakeet_ctx* ctx, const char* wav_path,
+        int beam_size, int nbest, int score_norm, const char* target_lang) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) {
+        ctx->last_error = "context has no loaded model";
+        return nullptr;
+    }
+    if (!wav_path) {
+        ctx->last_error = "wav_path is NULL";
+        return nullptr;
+    }
+    try {
+        const bool normalize = score_norm != 0;
+        const std::string lang = target_lang ? target_lang : "";
+        std::vector<pk::NBestTranscription> hypotheses =
+            ctx->model->transcribe_path_nbest(
+                wav_path, beam_size, nbest, normalize, lang);
+        const pk::ParakeetConfig& cfg = ctx->model->config();
+        const float frame_sec =
+            (float)cfg.hop_length * (float)cfg.subsampling_factor /
+            (float)cfg.sample_rate;
+        std::string json = pk::nbest_transcriptions_to_json(
+            hypotheses, beam_size, normalize, frame_sec);
+        ctx->last_error.clear();
+        char* out = dup_to_c(json);
+        if (!out) {
+            ctx->last_error = "out of memory";
+            return nullptr;
+        }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
+}
+
+extern "C" char* parakeet_capi_transcribe_pcm_nbest_json(
+        parakeet_ctx* ctx, const float* samples, int n_samples, int sample_rate,
+        int beam_size, int nbest, int score_norm, const char* target_lang) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) {
+        ctx->last_error = "context has no loaded model";
+        return nullptr;
+    }
+    if (!samples || n_samples < 0) {
+        ctx->last_error = "invalid samples buffer";
+        return nullptr;
+    }
+    try {
+        const bool normalize = score_norm != 0;
+        const std::string lang = target_lang ? target_lang : "";
+        const std::vector<float> pcm(samples, samples + n_samples);
+        std::vector<pk::NBestTranscription> hypotheses =
+            ctx->model->transcribe_pcm_nbest(
+                pcm, sample_rate, beam_size, nbest, normalize, lang);
+        const pk::ParakeetConfig& cfg = ctx->model->config();
+        const float frame_sec =
+            (float)cfg.hop_length * (float)cfg.subsampling_factor /
+            (float)cfg.sample_rate;
+        std::string json = pk::nbest_transcriptions_to_json(
+            hypotheses, beam_size, normalize, frame_sec);
+        ctx->last_error.clear();
+        char* out = dup_to_c(json);
+        if (!out) {
+            ctx->last_error = "out of memory";
+            return nullptr;
+        }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Streaming API
 // ---------------------------------------------------------------------------

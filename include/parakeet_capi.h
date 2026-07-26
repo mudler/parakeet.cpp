@@ -159,6 +159,27 @@ char* parakeet_capi_transcribe_pcm_batch_json_lang(parakeet_ctx* ctx,
                                                    int sample_rate, int decoder,
                                                    const char* target_lang);
 
+// Offline TDT beam search returning ranked hypotheses as JSON. These are
+// additive, TDT-only entry points; they do not change the existing greedy
+// transcription functions or ABI version. `beam_size >= nbest >= 1`.
+// `score_norm != 0` matches NeMo's default score/sequence-length ranking.
+// `target_lang` has the same semantics as the other *_lang functions.
+//
+// JSON shape:
+//   {"beam_size":4,"score_norm":true,"frame_sec":0.080000,
+//    "hypotheses":[
+//      {"text":"...","score":-12.3,"normalized_score":-0.45,
+//       "tokens":[{"id":123,"frame":7,"t":0.560,
+//                  "duration_frames":2,"duration":0.160}, ...]}
+//    ]}
+char* parakeet_capi_transcribe_path_nbest_json(
+    parakeet_ctx* ctx, const char* wav_path,
+    int beam_size, int nbest, int score_norm, const char* target_lang);
+
+char* parakeet_capi_transcribe_pcm_nbest_json(
+    parakeet_ctx* ctx, const float* samples, int n_samples, int sample_rate,
+    int beam_size, int nbest, int score_norm, const char* target_lang);
+
 // ---------------------------------------------------------------------------
 // Streaming API (cache-aware streaming RNN-T, e.g. the EOU model
 // nvidia/parakeet_realtime_eou_120m-v1). The stream session buffers incoming

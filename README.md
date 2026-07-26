@@ -234,6 +234,10 @@ parakeet-cli transcribe --model m.gguf --input audio.wav --timestamps
 #    "tokens":[{"id":..,"t":..,"conf":..}]}
 parakeet-cli transcribe --model m.gguf --input audio.wav --json
 
+# Offline TDT N-best hypotheses as ranked JSON
+parakeet-cli transcribe --model m.gguf --input audio.wav --decoder tdt \
+  --beam-size 4 --nbest 4
+
 # Read WAV bytes from stdin (useful with ffmpeg/curl pipelines)
 ffmpeg -i input.mp3 -f wav - | parakeet-cli transcribe --model m.gguf --input -
 
@@ -248,6 +252,10 @@ parakeet-cli transcribe --model eou.gguf --input audio.wav --stream
 ```
 
 Timestamps and confidence match NeMo's `transcribe(timestamps=True)` with the `max_prob` confidence method exactly (word offsets to 0.0 s, per-token and per-word confidence within `5e-6`), for both the TDT and CTC heads. See `docs/parity.md`. Word start and end are in seconds (`frame x hop x subsampling / sample_rate`, which works out to 0.08 s/frame here); confidence is the rescaled softmax probability of the emitted token, aggregated per word with NeMo's `min`.
+
+The optional TDT beam decoder follows NeMo's default sequence-level beam
+search and exposes raw/normalized scores plus token frame/duration metadata.
+See [`docs/tdt-nbest.md`](docs/tdt-nbest.md).
 
 The `parakeet-cli` binary lands at `build/examples/cli/parakeet-cli`.
 
