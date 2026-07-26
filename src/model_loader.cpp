@@ -60,11 +60,10 @@ static std::string kv_str(gguf_context* g, const char* k, const char* d=""){
     int64_t id = gguf_find_key(g,k); return id<0 ? std::string(d) : std::string(gguf_get_val_str(g,id));
 }
 ModelLoader::~ModelLoader(){
-    // Free the weight buffer BEFORE the ctxs. For the CPU path it is a from_ptr
-    // buffer (free_buffer == NULL) that does NOT own its memory (ctx_ does); for
-    // the device path it OWNS the device buffer. ggml_backend_buffer_free handles
-    // both. device_ctx_ holds the device tensor metadata (no_alloc); ctx_ holds
-    // the host source data.
+    // Free the weight buffer BEFORE the contexts. For the CPU path it is a
+    // from_ptr buffer (free_buffer == NULL) that does NOT own its memory
+    // (ctx_ does); for the device path it OWNS the device buffer. The device
+    // upload path releases ctx_ as soon as the upload completes.
     if(weights_buf_) ggml_backend_buffer_free(weights_buf_);
     if(device_ctx_) ggml_free(device_ctx_);
     if(gguf_) gguf_free(gguf_); if(ctx_) ggml_free(ctx_);
@@ -95,7 +94,8 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
     // ggml_backend_alloc_ctx_tensors rejects (it asserts the ctx is no_alloc).
     // So mirror every weight into a no_alloc=true ctx, allocate THAT on the
     // backend, upload each tensor's bytes from the host source, and repoint the
-    // name->tensor map at the device tensors. ctx_ stays alive as the host source.
+    // name->tensor map at the device tensors. The host context is only a staging
+    // allocation and can be released after all uploads complete.
     const size_t n = tensors_.size();
     struct ggml_init_params dp = {
         /*.mem_size  =*/ ggml_tensor_overhead() * (n + 8),
@@ -119,6 +119,13 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
     for (auto& pr : ups)
         ggml_backend_tensor_set(pr.first, pr.second, 0, ggml_nbytes(pr.first));
     tensors_.swap(devmap);   // graphs now reference the device-resident tensors
+
+    // The device tensors and their backend buffer own everything needed for
+    // inference. Keeping the no_alloc=false loader context alive retained a
+    // second full copy of every model weight (notably ~708 MiB for the 0.6B Q5_K
+    // model) for the lifetime of the process.
+    ggml_free(ctx_);
+    ctx_ = nullptr;
     return true;
 }
 bool ModelLoader::load(const std::string& path){
