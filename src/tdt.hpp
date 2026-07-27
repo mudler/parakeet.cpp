@@ -99,4 +99,15 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
     const std::vector<int32_t>& durations, int blank_id,
     int beam_size, int nbest, bool score_norm = true);
 
+namespace detail {
+
+// Returns the index of the highest-scoring positive duration, or -1 when no
+// positive duration exists. Kept in the internal TDT header so the beam-size-1
+// blank fallback can be tested without loading a model.
+int best_positive_duration_index(
+    const std::vector<float>& scores,
+    const std::vector<int32_t>& durations);
+
+} // namespace detail
+
 } // namespace pk

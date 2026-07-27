@@ -120,6 +120,27 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
     return hyp;
 }
 
+namespace detail {
+
+int best_positive_duration_index(
+    const std::vector<float>& scores,
+    const std::vector<int32_t>& durations) {
+    if (scores.size() != durations.size())
+        throw std::invalid_argument(
+            "best_positive_duration_index: size mismatch");
+
+    int best = -1;
+    for (size_t i = 0; i < durations.size(); ++i) {
+        if (durations[i] > 0 &&
+            (best < 0 || scores[i] > scores[(size_t)best])) {
+            best = (int)i;
+        }
+    }
+    return best;
+}
+
+} // namespace detail
+
 namespace {
 
 struct BeamState {
@@ -238,7 +259,7 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
 
     int zero_duration_idx = -1;
     int zero_duration_count = 0;
-    int min_nonzero_duration_idx = -1;
+    bool has_positive_duration = false;
     for (int i = 0; i < num_durations; ++i) {
         if (durations[i] < 0)
             throw std::invalid_argument(
@@ -247,13 +268,10 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
             zero_duration_idx = i;
             ++zero_duration_count;
         }
-        if (durations[i] > 0 &&
-            (min_nonzero_duration_idx < 0 ||
-             durations[i] < durations[min_nonzero_duration_idx])) {
-            min_nonzero_duration_idx = i;
-        }
+        if (durations[i] > 0)
+            has_positive_duration = true;
     }
-    if (min_nonzero_duration_idx < 0)
+    if (!has_positive_duration)
         throw std::invalid_argument(
             "tdt_beam_search: at least one positive duration is required");
     if (zero_duration_count > 1)
@@ -377,10 +395,10 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
             for (const RankedIndex& ranked_duration : best_durations) {
                 int duration_idx = ranked_duration.index;
                 if (duration_idx == zero_duration_idx) {
-                    if (best_durations.size() == 1)
-                        duration_idx = min_nonzero_duration_idx;
-                    else
+                    if (best_durations.size() != 1)
                         continue;
+                    duration_idx = detail::best_positive_duration_index(
+                        duration_logp, durations);
                 }
                 BeamState child = best;
                 child.hyp.score += token_logp[blank_id] +

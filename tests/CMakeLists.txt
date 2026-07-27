@@ -8,6 +8,7 @@ endfunction()
 
 pk_add_test(test_smoke)
 pk_add_test(test_nbest_json)
+pk_add_test(test_tdt_beam_core)
 pk_add_test(test_backend_device)
 pk_add_test(test_audio_io)
 pk_add_test(test_model_loader)

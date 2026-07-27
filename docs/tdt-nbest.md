@@ -21,6 +21,13 @@ zero-duration expansion that does not strictly reduce the accumulated score.
 This prevents malformed logits or floating-point saturation from creating a
 non-progress loop without truncating valid hypotheses.
 
+There is one intentional edge-case difference from NeMo's reference loop.
+When the duration beam contains only duration 0, blank cannot use that
+duration. NeMo substitutes the smallest positive duration; this implementation
+substitutes the highest-scoring positive duration so the legal blank expansion
+preserves model score ordering. A model-independent regression covers this
+case for `beam_size=1`.
+
 The implementation is limited to the default sequence-level TDT beam search.
 It does not add mAES/mALSD, an external language model, batched beam search, or
 streaming beam search. [NeMo labels this strategy experimental and recommends
