@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace {
