@@ -106,6 +106,17 @@ public:
     // True iff the most recent feed_mel_chunk emitted an <EOU>/<EOB> event.
     bool last_chunk_had_eou() const { return last_chunk_had_eou_; }
 
+    // Diagnostics: high-water mark of how many already-emitted tokens were
+    // REPROCESSED in a single feed_mel_chunk — the count handed to detokenize()
+    // plus the count handed to group_words() that chunk. Incremental decoding
+    // keeps this proportional to one chunk's new tokens (and the open word), so
+    // it stays bounded regardless of session length; rebuilding the running text
+    // / word grouping from the whole history each chunk makes it grow with the
+    // session (O(N^2) total). The streaming regression test asserts it stays
+    // bounded. reset_instrumentation() clears the high-water mark.
+    size_t max_chunk_reprocess() const { return max_chunk_reprocess_; }
+    void reset_instrumentation() { max_chunk_reprocess_ = 0; reprocess_this_chunk_ = 0; }
+
     // Move out all EOU/EOB events collected so far (drains the queue).
     std::vector<EouEvent> drain_events();
 
@@ -159,6 +170,11 @@ private:
     bool last_chunk_had_eou_ = false;
     std::vector<EouEvent> events_;
 
+    // Instrumentation (see max_chunk_reprocess()): tokens reprocessed in the
+    // current feed_mel_chunk, and the high-water mark across all chunks.
+    size_t reprocess_this_chunk_ = 0;
+    size_t max_chunk_reprocess_ = 0;
+
     // Per-word timestamp accumulation. `word_tokens_` holds the per-token
     // TokenInfo (absolute frame, conf, span) for the NON-SPECIAL tokens emitted
     // so far, in emission order — the same input pk::group_words consumes
@@ -169,6 +185,8 @@ private:
     // been handed out by drain_words(). finalize() flushes the trailing word.
     std::vector<TokenInfo> word_tokens_;
     std::vector<Word> words_;       // last regrouping of word_tokens_
+    std::vector<Word> final_words_; // words already finalized (never regrouped again)
+    size_t wt_cursor_ = 0;          // word_tokens_ index where the open word begins
     size_t words_finalized_ = 0;    // # of words_ that are final (safe to emit)
     size_t words_taken_ = 0;        // # of words already returned by drain_words()
     float frame_sec_f_ = 0.0f;      // frame_sec as float (group_words uses float)
