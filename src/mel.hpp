@@ -26,6 +26,15 @@ struct MelKernel {
     bool per_feature_;
     std::vector<float> window_;  // [n_fft] (centered-padded Hann from GGUF)
     std::vector<float> fb_;      // [n_mels, n_bins] row-major (fb_[m*n_bins + b])
+
+    // Sparse filterbank: the mel matrix is overwhelmingly zeros (each filter is
+    // band-limited in frequency). Store only the nonzero (bin, weight) pairs so
+    // the per-frame mel projection skips the ~98% zero entries. Bit-identical to
+    // the dense accumulation (skipping an exact-zero weight contributes 0.0).
+    // Flat arrays + per-mel offset/count (no per-frame allocation).
+    std::vector<int32_t> fb_nz_idx_;   // bin index per nonzero entry
+    std::vector<float>   fb_nz_val_;   // weight per nonzero entry
+    std::vector<int32_t> fb_nz_off_;   // [n_mels+1] prefix offsets into the above
 };
 
 class MelFrontend {

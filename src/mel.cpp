@@ -57,6 +57,16 @@ MelKernel::MelKernel(const ModelLoader& ml) {
         pk::weight_to_host_f32(ml, "preprocessor.featurizer.fb", fbuf);
         const float* fd = fbuf.data();
         std::memcpy(fb_.data(), fd, sizeof(float) * (size_t)n_mels_ * n_bins_);
+        // Build the sparse (bin, weight) index: skip exact-zero weights. This is
+        // bit-identical to the dense accumulation (0.0*power == 0.0 for finite
+        // power) while removing ~98% of the per-frame filterbank MACs.
+        fb_nz_off_.assign((size_t)n_mels_ + 1, 0);
+        for (int m = 0; m < n_mels_; ++m) {
+            const float* fbm = &fb_[(size_t)m * n_bins_];
+            for (int b = 0; b < n_bins_; ++b)
+                if (fbm[b] != 0.0f) { fb_nz_idx_.push_back(b); fb_nz_val_.push_back(fbm[b]); }
+            fb_nz_off_[m + 1] = (int32_t)fb_nz_idx_.size();
+        }
     }
 }
 
@@ -81,11 +91,15 @@ void MelKernel::frame_logmel(const double* frame_in, float* out_col, int out_str
     }
 
     // ----- mel projection + log(mel + guard) -----
+    // Iterate only the nonzero filterbank weights (fb is ~98% zeros); bit-identical
+    // to the dense sum since an exact-zero weight contributes exactly 0.0.
+    const int32_t* off = fb_nz_off_.data();
+    const int32_t* idx = fb_nz_idx_.data();
+    const float*   val = fb_nz_val_.data();
     for (int m = 0; m < n_mels_; ++m) {
-        const float* fbm = &fb_[(size_t)m * n_bins_];
         double acc = 0.0;
-        for (int b = 0; b < n_bins_; ++b)
-            acc += (double)fbm[b] * power[b];
+        for (int32_t k = off[m]; k < off[m + 1]; ++k)
+            acc += (double)val[k] * power[idx[k]];
         out_col[(size_t)m * out_stride] = (float)std::log(acc + (double)log_guard_);
     }
 }
