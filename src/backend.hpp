@@ -6,6 +6,7 @@
 
 struct ggml_context;
 struct ggml_tensor;
+struct ggml_cgraph;
 struct ggml_backend;
 typedef struct ggml_backend* ggml_backend_t;
 
@@ -55,6 +56,12 @@ public:
     // registry device name for a GPU backend, e.g. the CUDA device name).
     const char* device_name() const { return device_name_.c_str(); }
 
+    // True iff the active backend is a non-CPU (GPU/IGPU) device. The graph-
+    // capture/replay decode optimisation only helps GPU (it is launch-overhead
+    // bound there); on CPU the per-step set_input + capture-readback overhead
+    // it adds is a net regression, so callers gate on this.
+    bool is_gpu() const;
+
     // The underlying CPU ggml backend. Exposed so the loader can give its weight
     // tensors a backend buffer over the SAME backend graphs run on (see
     // ModelLoader::realize_weights). Any CPU buffer is compatible with the CPU
@@ -95,6 +102,8 @@ private:
     Impl* impl_;
     int   n_threads_ = 1;
     std::string device_name_ = "cpu";
+
+    friend class ReplayGraph;
 };
 
 // Register a host-backed graph input for the currently-active Backend::compute
@@ -148,5 +157,85 @@ void ensure_weights_realized(const ModelLoader& ml);
 // are realized first. Use this for host-side computation that needs raw floats
 // (preprocessing, batch-norm folding) — NOT for graph leaves (use clone_weight).
 void weight_to_host_f32(const ModelLoader& ml, const char* name, std::vector<float>& out);
+
+// A graph built ONCE and recomputed many times, keeping the SAME ggml context /
+// cgraph / input tensors alive across calls. The C++ analogue of megapar's
+// CUDA-graph step capture, realized through ggml's OWN capture:
+//
+// ggml-cuda keys its internal CUDA graph on `cgraph->nodes[0]` (a tensor pointer
+// owned by the compute context). Backend::compute does ggml_init + ggml_free
+// EVERY call, so every per-step graph gets a NEW context -> NEW node pointers ->
+// a different key -> CUDA-graph capture NEVER warms up and every tiny per-step
+// op is launched directly (the launch-overhead regime that dominates the GPU
+// transducer decode loop). ReplayGraph keeps the context + cgraph alive across
+// calls, so nodes[0] is a STABLE pointer: ggml-cuda warms up after one extra
+// direct eval and then replays the captured graph, collapsing the per-step
+// launch storm. On CPU this still wins by skipping the per-call ggml_init /
+// gallocr re-plan / ggml_free.
+//
+// The replayed graph's input tensors live in the (persistent) ggml context; the
+// caller feeds fresh data into them each step via the returned input handles.
+//
+// Usage:
+//   ReplayGraph rg(backend, [&](ggml_context* ctx){
+//       ggml_tensor* a = pk::graph_input_tensor(ctx, ...);
+//       return some_op(ctx, a, weight);
+//   });
+//   // build() recorded `a`'s handle; feed it:
+//   rg.set_input(0, host_a, nbytes_a);
+//   std::vector<float> out; rg.compute(out);
+class ReplayGraph {
+public:
+    // Build the graph now: runs `build(ctx)` in a no_alloc context (same
+    // contract as Backend::compute's build lambda — register host inputs via
+    // pk::add_graph_input / pk::graph_input_tensor), allocates the result via
+    // the backend's persistent gallocr, and remembers the input-tensor handles
+    // (in registration order) for set_input(). `backend` must outlive this
+    // object (it owns the gallocr the graph is allocated in).
+    ReplayGraph(Backend& backend,
+                const std::function<ggml_tensor*(ggml_context*)>& build);
+    ~ReplayGraph();
+
+    ReplayGraph(const ReplayGraph&) = delete;
+    ReplayGraph& operator=(const ReplayGraph&) = delete;
+
+    // Feed `nbytes` from `host` into input #`i` (the i-th tensor registered
+    // during build). The data lands in the persistent input tensor; it must
+    // stay valid until compute() returns.
+    void set_input(size_t i, const void* host, size_t nbytes);
+
+    // Recompute the graph (with whatever data set_input wrote) and read the
+    // output tensor's f32 contents into `out`. Returns true on success.
+    bool compute(std::vector<float>& out);
+
+    // Number of input tensors registered during build().
+    size_t n_inputs() const { return inputs_.size(); }
+
+    // Recompute the graph and read BOTH the output tensor (into `out`) and every
+    // tensor registered via pk::capture_graph_output() during build() (into the
+    // caller's stable dst vectors). The captures are remembered across calls
+    // (unlike Backend::compute, which clears them), so the same dst vectors are
+    // re-filled each step. Used by the prediction net to pull each layer's new
+    // (h', c') state out of the replayed graph.
+    bool compute_with_captures(std::vector<float>& out);
+
+private:
+    Backend& backend_;
+    ggml_context* ctx_ = nullptr;
+    ggml_cgraph*  gf_  = nullptr;
+    ggml_tensor*  out_ = nullptr;
+    // Input tensors recorded in build() order; set_input(i) writes into these.
+    std::vector<ggml_tensor*> inputs_;
+    // Capture tensors + their stable dst vectors (recorded from
+    // pk::capture_graph_output() during build). compute_with_captures() re-fills
+    // each dst after every replay.
+    std::vector<std::pair<ggml_tensor*, std::vector<float>*>> captures_;
+    // Whether gf_ was allocated via the sched fallback (true) or the fast
+    // gallocr path (false). Set once in alloc_internal(); read in compute().
+    bool need_sched_ = false;
+
+    // Allocate gf_ on the persistent gallocr / sched (called once in the ctor).
+    bool alloc_internal();
+};
 
 } // namespace pk
