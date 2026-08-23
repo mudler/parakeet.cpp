@@ -7,7 +7,7 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-#include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace pk {
@@ -107,12 +107,20 @@ void rfft(const std::vector<float>& in, std::vector<float>& re, std::vector<floa
     const int n = static_cast<int>(in.size());
     assert(n > 0 && (n & (n - 1)) == 0);
 
-    // Cache one plan per distinct n (n is fixed for a model; reuse across frames).
-    // thread_local so concurrent rfft callers (e.g. a multi-request server) never
-    // race on the reusable double scratch; the plan is rebuilt once per thread.
-    static thread_local FftPlan plan(n);
-
-    plan.apply(in.data(), re, im);
+    // Cache the plan for the LAST-seen n, rebuilding when n changes. rfft is a
+    // public function and may be called with different power-of-two lengths on
+    // the same thread (e.g. different models with different n_fft), so the plan
+    // MUST be keyed by n — caching only the first length would run a
+    // differently-sized input against the wrong transform. thread_local so
+    // concurrent rfft callers (e.g. a multi-request server) never race on the
+    // reusable double scratch.
+    static thread_local int cached_n = 0;
+    static thread_local std::unique_ptr<FftPlan> cached;
+    if (cached_n != n) {
+        cached = std::make_unique<FftPlan>(n);
+        cached_n = n;
+    }
+    cached->apply(in.data(), re, im);
 }
 
 } // namespace pk
