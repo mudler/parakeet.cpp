@@ -7,17 +7,17 @@ name: release
 # OpenAI-compatible HTTP server (examples/server) — the same downstream value
 # llama.cpp/whisper.cpp ship as llama-server/whisper-server. It already built
 # in this workflow (PARAKEET_BUILD_SERVER defaults ON); this just packages it.
-# BUILD_SHARED_LIBS=OFF folds the ggml backends into the
-# binary (the docker images keep them shared; a download-and-run bundle should
-# not need a lib directory). GGML_NATIVE=OFF keeps the binaries portable
-# across CPUs, same as the docker images and ci.yml.
+# BUILD_SHARED_LIBS=OFF folds most ggml backends into the binary. ROCm uses
+# shared ggml libraries and packages them beside each ELF because its backend
+# is dynamically loaded. GGML_NATIVE=OFF keeps the binaries portable across
+# CPUs, same as the docker images and ci.yml.
 #
 # The linux cpu variants additionally ship as binary-only AppImages, built by
 # packaging/appimage/make-appimage.sh (the same script docker/Dockerfile.static
 # uses), so there is one grab-and-run file per arch alongside the tarballs.
 #
 # Variants:
-#   linux   x64: cpu, vulkan, cuda      arm64: cpu, vulkan
+#   linux   x64: cpu, vulkan, cuda, rocm arm64: cpu, vulkan
 #   macos   arm64: metal                x64: cpu (cross-compiled on the arm
 #                                       runner; GitHub is retiring Intel ones)
 #   windows x64: cpu, vulkan, cuda
@@ -91,6 +91,11 @@ jobs:
             # gens, real code for 86/89/120a, plus 121a for GB10 on CUDA 13).
             cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
             cuda_archs: ""
+          - backend: rocm
+            arch: x64
+            runner: ubuntu-24.04
+            cmake_args: "-DPARAKEET_GGML_HIP=ON -DGGML_HIP_NO_VMM=ON -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++ -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm-7.2.4"
+            gpu_targets: "gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
           - backend: cuda12
             arch: x64
             runner: ubuntu-24.04
@@ -143,6 +148,21 @@ jobs:
           sudo apt-get install -y cuda-toolkit-13-0
           echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
 
+      - name: Install ROCm 7.2.4
+        if: matrix.backend == 'rocm'
+        run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
+            | gpg --dearmor \
+            | sudo tee /etc/apt/keyrings/rocm.gpg >/dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          printf '%s\n' 'Package: *' 'Pin: release o=repo.radeon.com' 'Pin-Priority: 600' \
+            | sudo tee /etc/apt/preferences.d/rocm-pin-600 >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y hipcc hip-dev rocm-device-libs hipblas-dev rocblas-dev
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+
       - name: Install CUDA toolkit 12
         if: matrix.backend == 'cuda12'
         run: |
@@ -155,29 +175,38 @@ jobs:
       - name: Configure
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
+          GPU_TARGETS: ${{ matrix.gpu_targets }}
         run: |
-          EXTRA=""
+          EXTRA=("-DBUILD_SHARED_LIBS=OFF")
           if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             # $ORIGIN rpath so the bundled cudart/cublas next to the binary
             # are found without LD_LIBRARY_PATH.
-            EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
+            EXTRA+=("-DCMAKE_BUILD_RPATH=\$ORIGIN")
+          fi
+          if [ "${{ matrix.backend }}" = "rocm" ]; then
+            EXTRA=(
+              "-DBUILD_SHARED_LIBS=ON"
+              "-DCMAKE_INSTALL_RPATH=\$ORIGIN"
+              "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"
+            )
           fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_NATIVE=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
             -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
+            ${GPU_TARGETS:+"-DGPU_TARGETS=${GPU_TARGETS}"} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
-            ${EXTRA:+"$EXTRA"}
+            "${EXTRA[@]}"
 
       - name: Build
         run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 
       - name: Smoke test (usage banner and version)
+        if: matrix.backend != 'rocm'
         # The CLI exits nonzero when invoked bare; capture first so set -e
         # only judges the grep.
         run: |
@@ -203,6 +232,73 @@ jobs:
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
                   "$BUNDLE"/
+          fi
+          if [ "${{ matrix.backend }}" = "rocm" ]; then
+            scripts/package_rocm_libraries.sh build/third_party/ggml/src "$BUNDLE"
+
+            test -x "$BUNDLE/parakeet-cli"
+            test -x "$BUNDLE/parakeet-server"
+            test -f "$BUNDLE/LICENSE"
+            test -f "$BUNDLE/README.md"
+            test -e "$BUNDLE/libggml.so"
+            test -e "$BUNDLE/libggml-base.so"
+            test -e "$BUNDLE/libggml-cpu.so"
+            test -e "$BUNDLE/libggml-hip.so"
+
+            check_origin_rpath() {
+              local elf=$1 dynamic record path has_origin=0
+              local -a rpath_records rpath_components
+              dynamic=$(readelf -d "$elf")
+              mapfile -t rpath_records < <(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+              if [ "${#rpath_records[@]}" -eq 0 ]; then
+                echo "staged ELF RPATH/RUNPATH is empty: $elf" >&2
+                return 1
+              fi
+              for record in "${rpath_records[@]}"; do
+                case "$record" in
+                  ""|:*|*:|*::*)
+                    echo "staged ELF RPATH/RUNPATH has an empty component: $elf ($record)" >&2
+                    return 1
+                    ;;
+                esac
+                IFS=: read -ra rpath_components <<<"$record"
+                for path in "${rpath_components[@]}"; do
+                  case "$path" in
+                    '$ORIGIN') has_origin=1 ;;
+                    /opt/rocm/lib) ;;
+                    *)
+                      echo "staged ELF RPATH/RUNPATH component is outside the runtime boundary: $elf ($path)" >&2
+                      return 1
+                      ;;
+                  esac
+                done
+              done
+              if [ "$has_origin" -ne 1 ]; then
+                echo "staged ELF RPATH/RUNPATH is missing \$ORIGIN: $elf" >&2
+                return 1
+              fi
+            }
+            check_linkage() {
+              local elf=$1 dependencies
+              dependencies=$(ldd "$elf")
+              printf '%s\n' "$dependencies"
+              if grep -q 'not found' <<<"$dependencies"; then
+                echo "unresolved staged dependency: $elf" >&2
+                return 1
+              fi
+            }
+
+            mapfile -t ggml_libraries < <(find "$BUNDLE" -type f -name 'libggml*.so*' -print)
+            test "${#ggml_libraries[@]}" -gt 0
+            for elf in "$BUNDLE/parakeet-cli" "$BUNDLE/parakeet-server" "${ggml_libraries[@]}"; do
+              check_origin_rpath "$elf"
+              check_linkage "$elf"
+            done
+
+            out=$("$BUNDLE/parakeet-cli" 2>&1 || true)
+            grep -qi usage <<<"$out"
+            out=$("$BUNDLE/parakeet-server" --help 2>&1 || true)
+            grep -qi usage <<<"$out"
           fi
           tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
@@ -251,23 +347,31 @@ jobs:
       - name: Configure (shared C-API lib)
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
+          GPU_TARGETS: ${{ matrix.gpu_targets }}
         run: |
-          EXTRA=""
+          EXTRA=("-DBUILD_SHARED_LIBS=OFF")
           if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
-            EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
+            EXTRA+=("-DCMAKE_BUILD_RPATH=\$ORIGIN")
+          fi
+          if [ "${{ matrix.backend }}" = "rocm" ]; then
+            EXTRA=(
+              "-DBUILD_SHARED_LIBS=ON"
+              "-DCMAKE_INSTALL_RPATH=\$ORIGIN"
+              "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"
+            )
           fi
           cmake -B build-shared \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_NATIVE=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
             -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
+            ${GPU_TARGETS:+"-DGPU_TARGETS=${GPU_TARGETS}"} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
-            ${EXTRA:+"$EXTRA"}
+            "${EXTRA[@]}"
 
       - name: Build (shared C-API lib)
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
@@ -283,6 +387,68 @@ jobs:
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
                   "$BUNDLE"/
+          fi
+          if [ "${{ matrix.backend }}" = "rocm" ]; then
+            scripts/package_rocm_libraries.sh build-shared/third_party/ggml/src "$BUNDLE"
+
+            test -f "$BUNDLE/libparakeet.so"
+            test -f "$BUNDLE/parakeet_capi.h"
+            test -f "$BUNDLE/LICENSE"
+            test -f "$BUNDLE/README.md"
+            test -e "$BUNDLE/libggml.so"
+            test -e "$BUNDLE/libggml-base.so"
+            test -e "$BUNDLE/libggml-cpu.so"
+            test -e "$BUNDLE/libggml-hip.so"
+
+            check_origin_rpath() {
+              local elf=$1 dynamic record path has_origin=0
+              local -a rpath_records rpath_components
+              dynamic=$(readelf -d "$elf")
+              mapfile -t rpath_records < <(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+              if [ "${#rpath_records[@]}" -eq 0 ]; then
+                echo "staged ELF RPATH/RUNPATH is empty: $elf" >&2
+                return 1
+              fi
+              for record in "${rpath_records[@]}"; do
+                case "$record" in
+                  ""|:*|*:|*::*)
+                    echo "staged ELF RPATH/RUNPATH has an empty component: $elf ($record)" >&2
+                    return 1
+                    ;;
+                esac
+                IFS=: read -ra rpath_components <<<"$record"
+                for path in "${rpath_components[@]}"; do
+                  case "$path" in
+                    '$ORIGIN') has_origin=1 ;;
+                    /opt/rocm/lib) ;;
+                    *)
+                      echo "staged ELF RPATH/RUNPATH component is outside the runtime boundary: $elf ($path)" >&2
+                      return 1
+                      ;;
+                  esac
+                done
+              done
+              if [ "$has_origin" -ne 1 ]; then
+                echo "staged ELF RPATH/RUNPATH is missing \$ORIGIN: $elf" >&2
+                return 1
+              fi
+            }
+            check_linkage() {
+              local elf=$1 dependencies
+              dependencies=$(ldd "$elf")
+              printf '%s\n' "$dependencies"
+              if grep -q 'not found' <<<"$dependencies"; then
+                echo "unresolved staged dependency: $elf" >&2
+                return 1
+              fi
+            }
+
+            mapfile -t ggml_libraries < <(find "$BUNDLE" -type f -name 'libggml*.so*' -print)
+            test "${#ggml_libraries[@]}" -gt 0
+            for elf in "$BUNDLE/libparakeet.so" "${ggml_libraries[@]}"; do
+              check_origin_rpath "$elf"
+              check_linkage "$elf"
+            done
           fi
           tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"

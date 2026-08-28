@@ -70,6 +70,16 @@ Peak RAM is also roughly 2x lower than NeMo, and lower still once quantized.
 
 GPU numbers (NVIDIA GB10, Grace-Blackwell, vs NeMo-GPU in the `nvcr.io/nvidia/nemo` container, since NeMo can't run on the host's torch/CUDA stack directly): parakeet.cpp wins on all 10 models, with a median of 1.25x and up to 4.3x on the large TDT/hybrid models. NeMo's TDT greedy decode isn't CUDA-graph accelerated and ours is a lean C++ loop, which is most of that gap. The log-mel front end runs on the GPU via a ggml DFT-matmul graph; the CPU path is unchanged.
 
+On a Ryzen AI Max+ 395 / Radeon 8060S (`gfx1151`, Strix Halo), the warmed
+110M F16 TDT run over `tests/fixtures/speech.wav` took 34.505 ms on ROCm,
+53.914 ms on Vulkan, and 68.015 ms on CPU with 8 threads. All three backends
+produced this exact reference transcript:
+
+> Well, I don't wish to see it any more, observed Phoebe, turning away her eyes. It is certainly very like the old portrait.
+
+These measurements are indicative, not guaranteed. Host load, drivers, and
+build options affect processing time.
+
 ---
 
 ## Pre-built binaries
@@ -78,13 +88,39 @@ Every [release](https://github.com/mudler/parakeet.cpp/releases) ships pre-built
 
 | Platform | Variants |
 | -------- | -------- |
-| Linux x64 | cpu, vulkan, cuda |
+| Linux x64 | cpu, vulkan, cuda, cuda12, rocm |
 | Linux arm64 | cpu |
 | macOS arm64 | metal |
 | macOS x64 | cpu |
 | Windows x64 | cpu, vulkan, cuda |
 
-The cuda bundles target Turing (sm_75) and newer, including Blackwell. On Linux the CUDA runtime libraries are bundled in the tarball; on Windows download the `cudart-parakeet-bin-win-cuda-x64.zip` asset alongside the binary zip unless you already have the CUDA toolkit installed. The vulkan binaries need the Vulkan loader on the system (`libvulkan1` on Debian/Ubuntu; on Windows the GPU driver provides it).
+The cuda bundles target Turing (sm_75) and newer, including Blackwell. The
+Linux `cuda12` bundle retains CUDA 12 coverage for older Volta systems. On
+Linux the CUDA runtime libraries are bundled in the tarball; on Windows
+download the `cudart-parakeet-bin-win-cuda-x64.zip` asset alongside the binary
+zip unless you already have the CUDA toolkit installed. The vulkan binaries
+need the Vulkan loader on the system (`libvulkan1` on Debian/Ubuntu; on Windows
+the GPU driver provides it).
+
+The Linux x64 ROCm release provides these thin archives:
+
+- `parakeet-<version>-bin-linux-rocm-x64.tar.gz` contains the CLI and server.
+- `parakeet-<version>-lib-linux-rocm-x64.tar.gz` contains the shared C API.
+
+The thin archives include the required parakeet and ggml libraries. They
+require compatible ROCm 7.2 host userspace, which they do not bundle. Follow
+the [official AMD install documentation](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/install/quick-start.html)
+to install ROCm on the host.
+
+Both archives target this exact list:
+
+```text
+gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201
+```
+
+The list covers representative AMD Instinct accelerators and RDNA2, RDNA3,
+and RDNA4 Radeon GPUs. It also covers Ryzen AI APUs, including Strix Halo.
+Use the Vulkan or CPU archive as a fallback for GPUs outside this list.
 
 ## Build
 
@@ -123,7 +159,30 @@ To build for a GPU backend, forward its flag, e.g. Apple Metal:
 cmake -B build -DPARAKEET_GGML_METAL=ON && cmake --build build -j
 ```
 
-The CLI auto-selects the first GPU device the ggml registry reports (including integrated GPUs such as Ryzen APUs), so no runtime flag is needed. Use `PARAKEET_DEVICE` to override: set it to `cpu` to force CPU, or to a specific device name like `CUDA0` or `Vulkan1` (case-insensitive) to pick that device. Ops the chosen backend has no kernel for run on the CPU automatically, so a model always runs even when one op lacks a GPU kernel. On an Apple M4, Metal is up to about 5x faster than CPU on the larger models; see [Apple Metal](benchmarks/BENCHMARK.md#apple-metal-m4).
+Install the ROCm 7.2.4 development packages before you build the HIP backend.
+The following command matches the published Linux x64 ROCm build:
+
+```sh
+cmake -B build-rocm \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON \
+  -DPARAKEET_GGML_HIP=ON \
+  -DGPU_TARGETS="gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201" \
+  -DGGML_HIP_NO_VMM=ON \
+  -DGGML_NATIVE=OFF \
+  -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++ \
+  -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm-7.2.4
+cmake --build build-rocm -j
+```
+
+The CLI auto-selects the first GPU that ggml reports. A ROCm-only build usually
+selects `ROCm0`, including on integrated Ryzen GPUs. Set
+`PARAKEET_DEVICE=ROCm0` to select that device explicitly. Set
+`PARAKEET_DEVICE=cpu` to force CPU. Device names are case-insensitive, so CUDA
+and Vulkan selections such as `CUDA0` and `Vulkan1` continue to work. Ops that
+the selected backend does not support run on CPU automatically. On an Apple
+M4, Metal is up to about 5x faster than CPU on the larger models; see
+[Apple Metal](benchmarks/BENCHMARK.md#apple-metal-m4).
 
 ---
 
@@ -134,7 +193,12 @@ Two prebuilt images are published to GitHub Container Registry on every push to 
 - `ghcr.io/mudler/parakeet.cpp-cli`: the command-line transcriber.
 - `ghcr.io/mudler/parakeet.cpp-server`: the [OpenAI-compatible server](#openai-compatible-server).
 
-Each comes in a CPU and a CUDA variant (the CUDA tag is suffixed `-cuda`), and both are multi-arch (`linux/amd64` and `linux/arm64`), so the right one is pulled for your host automatically. They contain just the binary, so mount a converted `.gguf` model (and, for the cli, your audio) at runtime:
+Each image has CPU, CUDA 13, CUDA 12, and ROCm variants. CPU and both CUDA
+variants are multi-arch (`linux/amd64` and `linux/arm64`). CUDA 12 tags use
+the `-cuda12` suffix. ROCm is `linux/amd64` only; its tags use `latest-rocm`,
+`<version>-rocm`, and `<sha>-rocm`, where `<sha>` has the
+`sha-<short-commit>` form. The images contain no models, so mount a converted
+`.gguf` model at runtime. Also mount the audio when you use the CLI.
 
 ```sh
 # CLI, CPU
@@ -150,12 +214,38 @@ docker run --rm --gpus all \
   ghcr.io/mudler/parakeet.cpp-cli:latest-cuda \
   transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
 
-# Server: binds 0.0.0.0 and exposes 8080. Fetch a model by alias on first run,
-# or mount a local .gguf. Add --gpus all with the :latest-cuda tag for GPU.
+# CLI, ROCm
+docker run --rm \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  -v "$PWD/models:/models:ro" \
+  -v "$PWD/audio:/audio:ro" \
+  ghcr.io/mudler/parakeet.cpp-cli:latest-rocm \
+  transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
+
+# Server, CPU: fetch a model by alias on first run
 docker run --rm -p 8080:8080 ghcr.io/mudler/parakeet.cpp-server:latest --model tdt_ctc-110m
+
+# Server, ROCm: fetch a model by alias on first run
+docker run --rm -p 8080:8080 \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  ghcr.io/mudler/parakeet.cpp-server:latest-rocm \
+  --model tdt_ctc-110m
+
+# Server, ROCm: mount a local model instead
+docker run --rm -p 8080:8080 \
+  --device=/dev/kfd --device=/dev/dri --group-add video \
+  -v "$PWD/model.gguf:/model.gguf:ro" \
+  ghcr.io/mudler/parakeet.cpp-server:latest-rocm \
+  --model /model.gguf
 ```
 
 The CUDA image is built on CUDA 13, so it covers everything from Turing up through Blackwell, including GB10 / Grace-Blackwell (DGX Spark) on arm64.
+
+The ROCm image contains ROCm 7.2.4 userspace. The host supplies its AMD kernel
+driver and access to `/dev/kfd` and `/dev/dri`. The user must belong to the
+group passed through with `--group-add video`. The image auto-selects `ROCm0`.
+Set `PARAKEET_DEVICE=ROCm0` or `PARAKEET_DEVICE=cpu` with `docker run -e` to
+override selection.
 
 To build the images yourself, see the build args at the top of the [`Dockerfile`](Dockerfile); the cli is the default target and the server is `--target runtime-server`. The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any amd64 or arm64 host.
 
