@@ -2,6 +2,8 @@
 
 from pathlib import Path
 import re
+import subprocess
+import textwrap
 import unittest
 
 
@@ -60,10 +62,10 @@ class RocmReleaseWorkflowTest(unittest.TestCase):
         branch = self.rocm_branch(package)
         self.assertIn('dynamic=$(readelf -d "$elf")', branch)
         self.assertIn(
-            "paths=$(sed -nE 's/.*\\((RPATH|RUNPATH)\\).*\\[(.*)\\]/\\2/p'",
+            "mapfile -t rpath_records < <(sed -nE "
+            "'s/.*\\((RPATH|RUNPATH)\\).*\\[(.*)\\]/\\2/p'",
             branch,
         )
-        self.assertIn("if [ \"$paths\" != '$ORIGIN' ]; then", branch)
         self.assertIn("dependencies=$(ldd \"$elf\")", branch)
         self.assertIn("if grep -q 'not found' <<<\"$dependencies\"; then", branch)
         self.assertIn(
@@ -81,6 +83,58 @@ class RocmReleaseWorkflowTest(unittest.TestCase):
         loop_body = loop.group("body")
         self.assertEqual(loop_body.count('check_origin_rpath "$elf"'), 1)
         self.assertEqual(loop_body.count('check_linkage "$elf"'), 1)
+
+    def run_origin_rpath_validator(
+        self, package: str, dynamic_paths: str
+    ) -> subprocess.CompletedProcess[str]:
+        branch = self.rocm_branch(package)
+        function = re.search(
+            r"(?ms)^            check_origin_rpath\(\) \{\n.*?^            \}$",
+            branch,
+        )
+        self.assertIsNotNone(function, "RPATH/RUNPATH validator is missing")
+        script = textwrap.dedent(function.group(0)) + r'''
+readelf() {
+  while IFS= read -r path; do
+    printf ' 0x000000000000001d (RUNPATH)            Library runpath: [%s]\n' "$path"
+  done <<<"$TEST_DYNAMIC_PATHS"
+}
+check_origin_rpath staged.so
+'''
+        return subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "TEST_DYNAMIC_PATHS": dynamic_paths},
+        )
+
+    def test_rocm_rpath_validator_enforces_each_component(self) -> None:
+        cases = (
+            ("$ORIGIN", True),
+            ("$ORIGIN:/opt/rocm/lib", True),
+            ("/opt/rocm/lib:$ORIGIN", True),
+            ("$ORIGIN\n/opt/rocm/lib", True),
+            ("", False),
+            ("/opt/rocm/lib", False),
+            ("$ORIGIN:", False),
+            (":$ORIGIN", False),
+            ("$ORIGIN::/opt/rocm/lib", False),
+            ("$ORIGIN\n", False),
+            ("$ORIGIN/", False),
+            ("$ORIGIN/build", False),
+            ("$ORIGIN:build-shared/lib", False),
+            ("$ORIGIN:/opt/rocm/lib64", False),
+            ("$ORIGIN:/tmp/vendor/lib", False),
+            ("$ORIGIN:/home/runner/work/parakeet.cpp/build", False),
+            ("$ORIGIN\n/home/runner/work/parakeet.cpp/build-shared", False),
+        )
+        for step_name in ("Package", "Package (shared C-API lib)"):
+            package = self.step(step_name)
+            for dynamic_paths, accepted in cases:
+                with self.subTest(step=step_name, dynamic_paths=dynamic_paths):
+                    result = self.run_origin_rpath_validator(package, dynamic_paths)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_linux_matrix_preserves_every_backend_and_adds_rocm(self) -> None:
         entries = []

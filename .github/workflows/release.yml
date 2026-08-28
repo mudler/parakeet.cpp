@@ -218,11 +218,35 @@ jobs:
             test -e "$BUNDLE/libggml-hip.so"
 
             check_origin_rpath() {
-              local elf=$1 dynamic paths
+              local elf=$1 dynamic record path has_origin=0
+              local -a rpath_records rpath_components
               dynamic=$(readelf -d "$elf")
-              paths=$(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
-              if [ "$paths" != '$ORIGIN' ]; then
-                echo "staged ELF RPATH/RUNPATH must equal only \$ORIGIN: $elf ($paths)" >&2
+              mapfile -t rpath_records < <(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+              if [ "${#rpath_records[@]}" -eq 0 ]; then
+                echo "staged ELF RPATH/RUNPATH is empty: $elf" >&2
+                return 1
+              fi
+              for record in "${rpath_records[@]}"; do
+                case "$record" in
+                  ""|:*|*:|*::*)
+                    echo "staged ELF RPATH/RUNPATH has an empty component: $elf ($record)" >&2
+                    return 1
+                    ;;
+                esac
+                IFS=: read -ra rpath_components <<<"$record"
+                for path in "${rpath_components[@]}"; do
+                  case "$path" in
+                    '$ORIGIN') has_origin=1 ;;
+                    /opt/rocm/lib) ;;
+                    *)
+                      echo "staged ELF RPATH/RUNPATH component is outside the runtime boundary: $elf ($path)" >&2
+                      return 1
+                      ;;
+                  esac
+                done
+              done
+              if [ "$has_origin" -ne 1 ]; then
+                echo "staged ELF RPATH/RUNPATH is missing \$ORIGIN: $elf" >&2
                 return 1
               fi
             }
@@ -317,11 +341,35 @@ jobs:
             test -e "$BUNDLE/libggml-hip.so"
 
             check_origin_rpath() {
-              local elf=$1 dynamic paths
+              local elf=$1 dynamic record path has_origin=0
+              local -a rpath_records rpath_components
               dynamic=$(readelf -d "$elf")
-              paths=$(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
-              if [ "$paths" != '$ORIGIN' ]; then
-                echo "staged ELF RPATH/RUNPATH must equal only \$ORIGIN: $elf ($paths)" >&2
+              mapfile -t rpath_records < <(sed -nE 's/.*\((RPATH|RUNPATH)\).*\[(.*)\]/\2/p' <<<"$dynamic")
+              if [ "${#rpath_records[@]}" -eq 0 ]; then
+                echo "staged ELF RPATH/RUNPATH is empty: $elf" >&2
+                return 1
+              fi
+              for record in "${rpath_records[@]}"; do
+                case "$record" in
+                  ""|:*|*:|*::*)
+                    echo "staged ELF RPATH/RUNPATH has an empty component: $elf ($record)" >&2
+                    return 1
+                    ;;
+                esac
+                IFS=: read -ra rpath_components <<<"$record"
+                for path in "${rpath_components[@]}"; do
+                  case "$path" in
+                    '$ORIGIN') has_origin=1 ;;
+                    /opt/rocm/lib) ;;
+                    *)
+                      echo "staged ELF RPATH/RUNPATH component is outside the runtime boundary: $elf ($path)" >&2
+                      return 1
+                      ;;
+                  esac
+                done
+              done
+              if [ "$has_origin" -ne 1 ]; then
+                echo "staged ELF RPATH/RUNPATH is missing \$ORIGIN: $elf" >&2
                 return 1
               fi
             }
