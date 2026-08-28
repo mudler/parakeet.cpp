@@ -114,11 +114,14 @@ class RocmDockerWorkflowTest(unittest.TestCase):
             entry,
         )
         self.assertIn('matrix={\\"include\\":[${CPU}]}', self.setup)
-        self.assertIn('matrix={\\"include\\":[${CPU},${CUDA},${ROCM}]}', self.setup)
+        self.assertIn(
+            'matrix={\\"include\\":[${CPU},${CUDA},${CUDA12},${ROCM}]}',
+            self.setup,
+        )
         self.assertRegex(
             self.setup,
             r'(?s)if \[ "\$\{\{ github\.event_name \}\}" = "pull_request" \]; then.*?'
-            r'\$\{CPU\}.*?else.*?\$\{CPU\},\$\{CUDA\},\$\{ROCM\}',
+            r'\$\{CPU\}.*?else.*?\$\{CPU\},\$\{CUDA\},\$\{CUDA12\},\$\{ROCM\}',
         )
 
     def test_both_image_builds_forward_rocm_arguments_on_linux_amd64(self) -> None:
@@ -150,8 +153,10 @@ class RocmDockerWorkflowTest(unittest.TestCase):
         for image, variant, suffix in (
             ("cli", "cpu", ""),
             ("cli", "cuda", "-cuda"),
+            ("cli", "cuda12", "-cuda12"),
             ("server", "cpu", ""),
             ("server", "cuda", "-cuda"),
+            ("server", "cuda12", "-cuda12"),
         ):
             self.assertRegex(
                 self.merge,

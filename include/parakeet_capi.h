@@ -40,6 +40,13 @@ typedef struct parakeet_ctx parakeet_ctx;
 //     Added parakeet_capi_stream_drain_events (typed per-event records with
 //     is_eob + timestamps, freed with parakeet_capi_free_events) and an
 //     "events" array in the stream_feed_json / stream_finalize_json documents.
+//
+// v6: added parakeet_capi_transcribe_pcm_logits, exposing the CTC head's
+//     log-prob matrix (row-major [T, vocab+1], already log-softmaxed) instead
+//     of decoded text — for external LM/decoder stacks (e.g. pyctcdecode +
+//     KenLM) that need the raw distribution rather than this library's own
+//     greedy/beam decode. Freed with the new parakeet_capi_free_logits. The
+//     original entry points are unchanged.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -158,6 +165,56 @@ char* parakeet_capi_transcribe_pcm_batch_json_lang(parakeet_ctx* ctx,
                                                    const int* n_samples, int n_clips,
                                                    int sample_rate, int decoder,
                                                    const char* target_lang);
+
+// Offline TDT beam search returning ranked hypotheses as JSON. These are
+// additive, TDT-only entry points; they do not change the existing greedy
+// transcription functions or ABI version. `beam_size >= nbest >= 1`.
+// `score_norm != 0` matches NeMo's default score/sequence-length ranking.
+// `target_lang` has the same semantics as the other *_lang functions.
+//
+// JSON shape:
+//   {"beam_size":4,"score_norm":true,"frame_sec":0.080000,
+//    "hypotheses":[
+//      {"text":"...","score":-12.3,"normalized_score":-0.45,
+//       "tokens":[{"id":123,"frame":7,"t":0.560,
+//                  "duration_frames":2,"duration":0.160}, ...]}
+//    ]}
+char* parakeet_capi_transcribe_path_nbest_json(
+    parakeet_ctx* ctx, const char* wav_path,
+    int beam_size, int nbest, int score_norm, const char* target_lang);
+
+char* parakeet_capi_transcribe_pcm_nbest_json(
+    parakeet_ctx* ctx, const float* samples, int n_samples, int sample_rate,
+    int beam_size, int nbest, int score_norm, const char* target_lang);
+
+// Run mel + encoder + CTC head on in-memory mono float PCM and return the
+// log-prob matrix instead of decoded text, for callers that run their own
+// external decoder (e.g. pyctcdecode + a KenLM n-gram LM + hotwords) on top of
+// this library's CTC output rather than using parakeet.cpp's own greedy/beam
+// decode. If `sample_rate != 16000` the audio is linearly resampled to 16 kHz
+// first. Always runs the CTC head regardless of the model's preferred
+// decoder — `decoder` is not a parameter here, unlike parakeet_capi_transcribe_pcm.
+//
+// On success returns 0, mallocs `*out_logits` to `(*out_T) * (*out_vocab_plus_1)`
+// floats — row-major [T, vocab+1], i.e. out_logits[t*(*out_vocab_plus_1) + v],
+// already log-softmaxed over the vocab axis — and sets `*out_T` /
+// `*out_vocab_plus_1`. Free `*out_logits` with parakeet_capi_free_logits.
+//
+// On error returns nonzero. A NULL `ctx` or any NULL out-param pointer
+// returns nonzero without writing through any pointer (nothing to zero
+// safely). Otherwise (ctx and all three out-params valid, but e.g. no model,
+// invalid samples buffer, the model has no CTC head, or OOM) sets the
+// context's last error (see parakeet_capi_last_error) and leaves `*out_logits`
+// NULL and `*out_T`/`*out_vocab_plus_1` 0 — the caller owns nothing and has
+// nothing to free.
+int parakeet_capi_transcribe_pcm_logits(parakeet_ctx* ctx, const float* samples,
+                                        int n_samples, int sample_rate,
+                                        float** out_logits, int* out_T,
+                                        int* out_vocab_plus_1);
+
+// Free a logits buffer previously returned by
+// parakeet_capi_transcribe_pcm_logits. Safe on NULL.
+void parakeet_capi_free_logits(float* logits);
 
 // ---------------------------------------------------------------------------
 // Streaming API (cache-aware streaming RNN-T, e.g. the EOU model

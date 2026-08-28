@@ -38,4 +38,22 @@ std::string detokenize(const std::vector<std::string>& pieces,
     }
     return out;
 }
+
+std::vector<int32_t> strip_special_tokens(const std::vector<std::string>& pieces,
+                                          const std::vector<int32_t>& ids) {
+    std::vector<int32_t> out;
+    out.reserve(ids.size());
+    for (int32_t id : ids) {
+        if (id >= 0 && (size_t)id < pieces.size()) {
+            const std::string& piece = pieces[(size_t)id];
+            if (!piece.empty() &&
+                ((piece.front() == '<' && piece.back() == '>') ||
+                 (piece.front() == '[' && piece.back() == ']'))) {
+                continue;
+            }
+        }
+        out.push_back(id);
+    }
+    return out;
+}
 } // namespace pk

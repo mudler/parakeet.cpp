@@ -69,6 +69,9 @@ jobs:
         # PARAKEET_SERVER_E2E=1 flips the test from skip (77) to a real run.
         env:
           PARAKEET_SERVER_E2E: "1"
+          # First-run model download speed varies on hosted runners; the job
+          # timeout remains the outer cap.
+          PARAKEET_SERVER_E2E_READY_TIMEOUT: "600"
         run: ctest --test-dir build --output-on-failure -R '^server_e2e$'
 
   # -------------------------------------------------------------------------
@@ -135,6 +138,21 @@ jobs:
           .venv/bin/python scripts/convert_parakeet_to_gguf.py \
             --model nvidia/parakeet-tdt_ctc-110m \
             --output /tmp/pk110m_cl.gguf
+
+      - name: Generate NeMo TDT N-best reference
+        run: |
+          .venv/bin/python scripts/gen_nemo_baseline.py \
+            --model nvidia/parakeet-tdt_ctc-110m \
+            --audio tests/fixtures/speech.wav \
+            --tdt-beam-size 4 \
+            --output /tmp/tdt_nbest_baseline.gguf
+
+      - name: Assert TDT N-best parity with NeMo
+        env:
+          PARAKEET_TEST_GGUF: /tmp/pk110m_cl.gguf
+          PARAKEET_TEST_TDT_NBEST_BASELINE: /tmp/tdt_nbest_baseline.gguf
+        run: |
+          ctest --test-dir build --output-on-failure -R '^test_tdt_beam$'
 
       - name: Transcribe speech fixture with TDT decoder
         run: |

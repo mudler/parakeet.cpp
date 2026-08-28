@@ -1,0 +1,86 @@
+# Static parakeet-cli builds (arm64 + amd64) and AppImage packaging, via
+# docker buildx (+ qemu user emulation for foreign arches; slow but
+# reproducible).
+#
+# Raw binary, Pi 5 tuned (the original arm64 cross-compile flow):
+#
+#   docker buildx build --platform linux/arm64 -f docker/Dockerfile.static \
+#       --target export --output type=local,dest=build/arm64 .
+#
+# Binary-only AppImages for both arches:
+#
+#   docker buildx build --platform linux/arm64,linux/amd64 -f docker/Dockerfile.static \
+#       --target export-appimage --output type=local,dest=build/appimage .
+#   -> build/appimage/linux_{arm64,amd64}/parakeet-cli-<version>-{aarch64,x86_64}.AppImage
+#
+# The base is ubuntu:24.04 so the toolchain (gcc 13.3, glibc 2.39) and
+# resulting ABI match a Raspberry Pi 5 running Ubuntu 24.04 -- the binary
+# drops straight onto the Pi (it links only the system libc/libstdc++/libgomp;
+# ggml and libparakeet are static). The AppImage bundles libstdc++/libgomp but
+# not glibc, so it carries the same glibc floor.
+#
+# arm64 defaults to the Pi 5's Cortex-A76 (armv8.2-a + dotprod + fp16), which
+# is what ggml's quantized kernels exploit. Override --build-arg
+# GGML_CPU_ARM_ARCH for a different chip, or set it to a baseline like
+# "armv8-a" for a portable (slower) binary. amd64 pins a portable Haswell+
+# baseline (AVX2/FMA/F16C/BMI2) since GGML_NATIVE=OFF.
+#
+# The build context must be a checkout with the ggml submodule populated
+# (git submodule update --init --recursive third_party/ggml).
+ARG UBUNTU=24.04
+
+FROM ubuntu:${UBUNTU} AS build
+ARG TARGETARCH
+ARG GGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16
+ARG PARAKEET_VERSION=0.0.1
+ARG JOBS=8
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+# The build context drops .git (see .dockerignore), so the ggml submodule's
+# .git gitlink dangles and CMake's scripts/apply_ggml_patches.sh (which uses
+# `git apply`) can't run. Re-init a throwaway git repo in the submodule tree so
+# the in-tree ggml patches (broadcast-fold sgemm, etc.) apply during configure.
+RUN rm -f third_party/ggml/.git && git -C third_party/ggml init -q
+# Static, self-contained CLI: BUILD_SHARED_LIBS=OFF keeps ggml + libparakeet in
+# the binary; GGML_NATIVE=OFF plus the per-arch flags target the machine the
+# binary will run on instead of the build host. Skip the server + tests to
+# keep the qemu build lean.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        ARCH_FLAGS="-DGGML_CPU_ARM_ARCH=${GGML_CPU_ARM_ARCH}"; \
+    else \
+        ARCH_FLAGS="-DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON"; \
+    fi \
+    && cmake -S . -B build/static \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DGGML_NATIVE=OFF \
+        ${ARCH_FLAGS} \
+        -DPARAKEET_BUILD_CLI=ON \
+        -DPARAKEET_BUILD_SERVER=OFF \
+        -DPARAKEET_BUILD_TESTS=OFF \
+        -DPARAKEET_VERSION=${PARAKEET_VERSION} \
+    && cmake --build build/static -j${JOBS} --target parakeet-cli
+
+# Thin export stage: `--output type=local` against this target writes just the
+# binary to the host (no image layers, no apt cruft).
+FROM scratch AS export
+COPY --from=build /src/build/static/examples/cli/parakeet-cli /
+
+# AppImage packaging runs in the target-arch image so make-appimage.sh can
+# resolve libstdc++/libgomp from the running system; only appimagetool runs
+# under qemu for the foreign arch, which is negligible next to the compile.
+FROM build AS appimage
+ARG TARGETARCH
+ARG PARAKEET_VERSION=0.0.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl file \
+    && rm -rf /var/lib/apt/lists/*
+RUN ARCH=$([ "$TARGETARCH" = "arm64" ] && echo aarch64 || echo x86_64) \
+    && packaging/appimage/make-appimage.sh \
+        build/static/examples/cli/parakeet-cli "$ARCH" "$PARAKEET_VERSION" /out
+
+FROM scratch AS export-appimage
+COPY --from=appimage /out/ /

@@ -59,10 +59,11 @@ jobs:
           # ROCm 7.2.4 publishes x86_64 packages. Build all supported targets
           # into one portable HIP backend and ship its runtime in the image.
           ROCM='{"variant":"rocm","arch":"amd64","runner":"ubuntu-24.04","build_base":"ubuntu:24.04","runtime_base":"ubuntu:24.04","cmake_args":"-DBUILD_SHARED_LIBS=ON -DPARAKEET_GGML_HIP=ON -DGGML_HIP_NO_VMM=ON -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++ -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm-7.2.4","cuda_archs":"","enable_rocm":"1","gpu_targets":"gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"}'
+          CUDA12='{"variant":"cuda12","arch":"amd64","runner":"ubuntu-24.04","build_base":"nvidia/cuda:12.9.2-devel-ubuntu24.04","runtime_base":"nvidia/cuda:12.9.2-runtime-ubuntu24.04","cmake_args":"-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON","cuda_archs":"70-real;90-real"},{"variant":"cuda12","arch":"arm64","runner":"ubuntu-24.04-arm","build_base":"nvidia/cuda:12.9.2-devel-ubuntu24.04","runtime_base":"nvidia/cuda:12.9.2-runtime-ubuntu24.04","cmake_args":"-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON","cuda_archs":"70-real;90-real"}'
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "matrix={\"include\":[${CPU}]}" >> "$GITHUB_OUTPUT"
           else
-            echo "matrix={\"include\":[${CPU},${CUDA},${ROCM}]}" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[${CPU},${CUDA},${CUDA12},${ROCM}]}" >> "$GITHUB_OUTPUT"
           fi
 
   # -------------------------------------------------------------------------
@@ -194,6 +195,9 @@ jobs:
           - image: cli
             variant: rocm
             suffix: "-rocm"
+          - image: cli
+            variant: cuda12
+            suffix: "-cuda12"
           - image: server
             variant: cpu
             suffix: ""
@@ -203,6 +207,9 @@ jobs:
           - image: server
             variant: rocm
             suffix: "-rocm"
+          - image: server
+            variant: cuda12
+            suffix: "-cuda12"
     steps:
       - name: Resolve image name
         id: img

@@ -20,6 +20,7 @@ LINUX_MATRIX = [
     ("vulkan", "arm64", "ubuntu-24.04-arm"),
     ("cuda", "x64", "ubuntu-24.04"),
     ("rocm", "x64", "ubuntu-24.04"),
+    ("cuda12", "x64", "ubuntu-24.04"),
 ]
 
 
@@ -191,7 +192,11 @@ check_origin_rpath staged.so
             self.assertIn('-DCMAKE_INSTALL_RPATH=\\$ORIGIN', rocm)
             self.assertIn('-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON', rocm)
             self.assertIn('${GPU_TARGETS:+"-DGPU_TARGETS=${GPU_TARGETS}"}', configure)
-            self.assertIn('if [ "${{ matrix.backend }}" = "cuda" ]; then', configure)
+            self.assertIn(
+                'if [ "${{ matrix.backend }}" = "cuda" ] || '
+                '[ "${{ matrix.backend }}" = "cuda12" ]; then',
+                configure,
+            )
             self.assertIn('-DCMAKE_BUILD_RPATH=\\$ORIGIN', configure)
 
     def test_binary_archive_stages_complete_payload_and_checks_every_elf(self) -> None:

@@ -1,6 +1,9 @@
 #include "audio_io.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <vector>
 #include <cstdint>
 
@@ -34,6 +37,27 @@ int main() {
     // not silent
     double e = 0; for (float v : a.samples) e += (double)v*v;
     if (e < 1.0) { std::fprintf(stderr, "energy too low %f\n", e); return 1; }
+
+    std::ifstream f(path, std::ios::binary);
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(f)),
+                                     std::istreambuf_iterator<char>());
+    if (bytes.empty()) { std::fprintf(stderr, "readback failed\n"); return 1; }
+    pk::Audio mem;
+    if (!pk::load_audio_16k_mono_from_memory(bytes.data(), bytes.size(), mem)) {
+        std::fprintf(stderr, "memory load failed\n"); return 1;
+    }
+    if (mem.sample_rate != a.sample_rate || mem.samples.size() != a.samples.size()) {
+        std::fprintf(stderr, "memory mismatch: %zu/%d vs %zu/%d\n",
+                     mem.samples.size(), mem.sample_rate, a.samples.size(), a.sample_rate);
+        return 1;
+    }
+    double max_delta = 0.0;
+    for (size_t i = 0; i < a.samples.size(); ++i)
+        max_delta = std::max(max_delta, std::fabs((double)a.samples[i] - (double)mem.samples[i]));
+    if (max_delta > 1e-6) {
+        std::fprintf(stderr, "memory sample mismatch: max_delta=%g\n", max_delta);
+        return 1;
+    }
     std::printf("audio_io ok: %zu samples @ %d Hz\n", a.samples.size(), a.sample_rate);
     return 0;
 }

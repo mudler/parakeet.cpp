@@ -38,7 +38,7 @@ std::string json_escape(const std::string& s) {
 
 static std::string fixed(double v, int prec) {
     // JSON has no NaN/Inf literal; emit 0 instead, matching the repo's
-    // append_json_float convention in src/parakeet_capi.cpp.
+    // append_json_float convention in src/transcription_json.cpp.
     if (!(v == v) || v > 1e30 || v < -1e30) return "0";
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.*f", prec, v);

@@ -12,6 +12,10 @@ name: release
 # is dynamically loaded. GGML_NATIVE=OFF keeps the binaries portable across
 # CPUs, same as the docker images and ci.yml.
 #
+# The linux cpu variants additionally ship as binary-only AppImages, built by
+# packaging/appimage/make-appimage.sh (the same script docker/Dockerfile.static
+# uses), so there is one grab-and-run file per arch alongside the tarballs.
+#
 # Variants:
 #   linux   x64: cpu, vulkan, cuda, rocm arm64: cpu, vulkan
 #   macos   arm64: metal                x64: cpu (cross-compiled on the arm
@@ -92,6 +96,11 @@ jobs:
             runner: ubuntu-24.04
             cmake_args: "-DPARAKEET_GGML_HIP=ON -DGGML_HIP_NO_VMM=ON -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++ -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm-7.2.4"
             gpu_targets: "gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
+          - backend: cuda12
+            arch: x64
+            runner: ubuntu-24.04
+            # cuda12.x is the last cuda that supports older GPU families, like Volta.
+            cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
             cuda_archs: ""
     steps:
       - name: Checkout (with submodules)
@@ -103,10 +112,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install Vulkan SDK (LunarG, x64)
         if: matrix.backend == 'vulkan' && matrix.arch == 'x64'
@@ -152,13 +163,22 @@ jobs:
           sudo apt-get install -y hipcc hip-dev rocm-device-libs hipblas-dev rocblas-dev
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"
 
+      - name: Install CUDA toolkit 12
+        if: matrix.backend == 'cuda12'
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-9
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
       - name: Configure
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
           GPU_TARGETS: ${{ matrix.gpu_targets }}
         run: |
           EXTRA=("-DBUILD_SHARED_LIBS=OFF")
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             # $ORIGIN rpath so the bundled cudart/cublas next to the binary
             # are found without LD_LIBRARY_PATH.
             EXTRA+=("-DCMAKE_BUILD_RPATH=\$ORIGIN")
@@ -176,6 +196,7 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${GPU_TARGETS:+"-DGPU_TARGETS=${GPU_TARGETS}"} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
@@ -184,15 +205,20 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         if: matrix.backend != 'rocm'
         # The CLI exits nonzero when invoked bare; capture first so set -e
         # only judges the grep.
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -201,7 +227,7 @@ jobs:
           mkdir "$BUNDLE"
           cp build/examples/cli/parakeet-cli build/examples/server/parakeet-server \
              LICENSE README.md "$BUNDLE"/
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
@@ -284,6 +310,37 @@ jobs:
           path: ${{ steps.pack.outputs.bundle }}.tar.gz
           if-no-files-found: error
 
+      # Binary-only AppImage from the same static cpu binary, packaged by the
+      # same script docker/Dockerfile.static uses. cpu-only: the vulkan/cuda
+      # binaries need system GPU stacks an AppImage can't sensibly bundle.
+      - name: Package AppImage
+        if: matrix.backend == 'cpu'
+        id: appimage
+        run: |
+          case "${{ matrix.arch }}" in
+            x64)   arch=x86_64 ;;
+            arm64) arch=aarch64 ;;
+          esac
+          packaging/appimage/make-appimage.sh \
+            build/examples/cli/parakeet-cli "$arch" "${{ steps.ver.outputs.version }}" .
+          echo "name=parakeet-cli-${{ steps.ver.outputs.version }}-${arch}.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test AppImage (version)
+        if: matrix.backend == 'cpu'
+        # EXTRACT_AND_RUN so the runner does not need FUSE.
+        run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
+          out=$(APPIMAGE_EXTRACT_AND_RUN=1 "./${{ steps.appimage.outputs.name }}" --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
+
+      - name: Upload AppImage artifact
+        if: matrix.backend == 'cpu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.appimage.outputs.name }}
+          path: ${{ steps.appimage.outputs.name }}
+          if-no-files-found: error
+
       # Shared C-API lib (issue #25): a separate build so the CLI bundle above
       # stays a single self-contained binary. PARAKEET_SHARED=ON folds ggml into
       # libparakeet.so the same way it is folded into the CLI.
@@ -293,7 +350,7 @@ jobs:
           GPU_TARGETS: ${{ matrix.gpu_targets }}
         run: |
           EXTRA=("-DBUILD_SHARED_LIBS=OFF")
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             EXTRA+=("-DCMAKE_BUILD_RPATH=\$ORIGIN")
           fi
           if [ "${{ matrix.backend }}" = "rocm" ]; then
@@ -310,6 +367,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${GPU_TARGETS:+"-DGPU_TARGETS=${GPU_TARGETS}"} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
@@ -324,7 +382,7 @@ jobs:
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
           mkdir "$BUNDLE"
           cp build-shared/libparakeet.so include/parakeet_capi.h LICENSE README.md "$BUNDLE"/
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
@@ -430,10 +488,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Configure
         run: |
@@ -444,19 +504,25 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         # The x64 binary needs Rosetta; only smoke test the native build.
         if: matrix.arch == 'arm64'
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -486,6 +552,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }}
 
       - name: Build (shared C-API lib)
@@ -545,10 +612,12 @@ jobs:
         id: ver
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME}"
           else
-            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_SHA::7}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "cmake_version=${version#v}" >> "$GITHUB_OUTPUT"
 
       - name: Apply ggml patches (Git Bash)
         run: bash scripts/apply_ggml_patches.sh
@@ -585,20 +654,26 @@ jobs:
             -DPARAKEET_BUILD_CLI=ON \
             -DPARAKEET_BUILD_SERVER=ON \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 
       - name: Build
         run: cmake --build build -j
 
-      - name: Smoke test (usage banner)
+      - name: Smoke test (usage banner and version)
         # The vulkan binary needs vulkan-1.dll, which the SDK install provides
         # on the runner; cpu and cuda load on a bare machine.
         run: |
+          expected="${{ steps.ver.outputs.cmake_version }}"
           out=$(./build/examples/cli/parakeet-cli.exe 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/cli/parakeet-cli.exe --version)
+          grep -qx "parakeet-cli ${expected}" <<<"$out"
           out=$(./build/examples/server/parakeet-server.exe --help 2>&1 || true)
           grep -qi usage <<<"$out"
+          out=$(./build/examples/server/parakeet-server.exe --version)
+          grep -qx "parakeet-server ${expected}" <<<"$out"
 
       - name: Package
         id: pack
@@ -632,6 +707,7 @@ jobs:
             -DPARAKEET_SHARED=ON \
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
+            -DPARAKEET_VERSION="${{ steps.ver.outputs.cmake_version }}" \
             ${{ matrix.cmake_args }} \
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 

@@ -59,9 +59,10 @@ yourself and pass the local path.
 ## Docker
 
 A prebuilt image is published per push to `ghcr.io/<owner>/parakeet.cpp-server`
-with CPU, CUDA, and ROCm variants. It binds `0.0.0.0` and exposes port 8080.
-The ROCm variant is Linux amd64 only. It uses `latest-rocm`, `<version>-rocm`,
-and `<sha>-rocm` tags. The `<sha>` value has the `sha-<short-commit>` form.
+with CPU, CUDA 13, CUDA 12, and ROCm variants. It binds `0.0.0.0` and exposes
+port 8080. CUDA 12 tags use the `-cuda12` suffix. The ROCm variant is Linux
+amd64 only. It uses `latest-rocm`, `<version>-rocm`, and `<sha>-rocm` tags. The
+`<sha>` value has the `sha-<short-commit>` form.
 
 Pass the same `--model` argument that you use with the local server. You can
 let the server fetch an alias or mount a local `.gguf` file:

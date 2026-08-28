@@ -15,6 +15,7 @@ fi
 SERVER="${1:?need path to parakeet-server}"
 FIXTURE="tests/fixtures/speech.wav"
 PORT="${PARAKEET_SERVER_E2E_PORT:-18080}"
+READY_TIMEOUT="${PARAKEET_SERVER_E2E_READY_TIMEOUT:-180}"
 CACHE="$(mktemp -d)"
 EXPECT="turning away her"
 
@@ -24,18 +25,22 @@ trap cleanup EXIT
 
 command -v curl >/dev/null 2>&1 || { echo "server_e2e: curl required"; exit 1; }
 [ -f "$FIXTURE" ] || { echo "server_e2e: missing $FIXTURE"; exit 1; }
+case "$READY_TIMEOUT" in
+    ''|*[!0-9]*) echo "server_e2e: PARAKEET_SERVER_E2E_READY_TIMEOUT must be seconds"; exit 1 ;;
+esac
+[ "$READY_TIMEOUT" -gt 0 ] || { echo "server_e2e: PARAKEET_SERVER_E2E_READY_TIMEOUT must be > 0"; exit 1; }
 
 "$SERVER" --model tdt_ctc-110m-q4_k --port "$PORT" --cache-dir "$CACHE" &
 SRV=$!
 
-# Wait up to 180s for /health (covers the model download on first run).
+# Wait for /health. The server binds only after first-run model download + load.
 ready=0
-for _ in $(seq 1 180); do
+for _ in $(seq 1 "$READY_TIMEOUT"); do
     if curl -fs "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then ready=1; break; fi
     kill -0 "$SRV" 2>/dev/null || { echo "server_e2e: server exited early"; exit 1; }
     sleep 1
 done
-[ "$ready" = "1" ] || { echo "server_e2e: server not ready"; exit 1; }
+[ "$ready" = "1" ] || { echo "server_e2e: server not ready after ${READY_TIMEOUT}s"; exit 1; }
 
 base="http://127.0.0.1:$PORT/v1/audio/transcriptions"
 fail=0

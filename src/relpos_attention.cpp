@@ -111,6 +111,11 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     // Additive mask [T_k, T_q]: 0 where query qi may attend to key kj, -inf
     // otherwise. (1) pad mask: key kj valid iff kj < valid_len. (2) chunked-
     // limited window for streaming models. See header / NeMo _create_masks.
+    // PADDED query rows (qi >= valid_len) are left fully unmasked: with a
+    // limited window a deeply padded row can have its ENTIRE row masked, and
+    // softmax over all -inf is NaN — which the post-softmax query mask does NOT
+    // clear (NaN*0 == NaN) and which poisons every softmax row of the next
+    // layer through the key path. Their finite garbage is zeroed below.
     const int chunk_size  = chunked_limited_ ? (att_right_ + 1) : 0;
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
@@ -119,6 +124,10 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
         float* md = mask_host.data();
         const float ninf = -INFINITY;
         for (int qi = 0; qi < T; ++qi) {
+            if (qi >= valid_len) {  // dead (padded) query row: see above
+                for (int kj = 0; kj < T; ++kj) md[(size_t)qi * T + kj] = 0.0f;
+                continue;
+            }
             const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
             for (int kj = 0; kj < T; ++kj) {
                 bool ok = (kj < valid_len);
@@ -256,6 +265,13 @@ ggml_tensor* RelPosAttention::build_graph_batched(
     // i12 = i02 % ne12 (head, here ne12=1 -> always 0) and i13 = i03 % ne13
     // (batch, here ne13=B -> exact per-item), and ggml_soft_max_impl asserts
     // a->ne[2] % mask->ne[2] == 0 and a->ne[3] % mask->ne[3] == 0.
+    // PADDED query rows (qi >= valid_len[b]) are left fully unmasked — with the
+    // chunked-limited window a deeply padded row (pad tail > att_left) has its
+    // ENTIRE row masked, softmax over all -inf is NaN, the post-softmax query
+    // mask keeps NaN (NaN*0), and the NaN key columns then poison EVERY softmax
+    // row of the next layer. This corrupted whole items of a heterogeneous-
+    // length batch on streaming models (clips differing by more than ~att_left
+    // encoder frames decoded empty). Their finite garbage is zeroed below.
     const int chunk_size  = chunked_limited_ ? (att_right_ + 1) : 0;
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
@@ -266,6 +282,11 @@ ggml_tensor* RelPosAttention::build_graph_batched(
         for (int b = 0; b < B; ++b) {
             const int vl = valid_len[b];
             for (int qi = 0; qi < T; ++qi) {
+                if (qi >= vl) {  // dead (padded) query row: see above
+                    for (int kj = 0; kj < T; ++kj)
+                        md[(size_t)b * T * T + (size_t)qi * T + kj] = 0.0f;
+                    continue;
+                }
                 const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
                 for (int kj = 0; kj < T; ++kj) {
                     bool ok = (kj < vl);
@@ -365,15 +386,20 @@ ggml_tensor* RelPosAttention::build_graph_batched_local(
     ggml_tensor* bd = ggml_mul_mat(ctx, php, qv);  // [P, T, H, B]  (php broadcasts over B)
     ggml_tensor* scores = ggml_add(ctx, ac, bd);   // [P, T, H, B]
 
-    // Per-item band mask [P, T, 1, B].
+    // Per-item band mask [P, T, 1, B]. Padded query rows whose entire band lies
+    // beyond vl are left unmasked (all -inf -> softmax NaN -> NaN*0 stays NaN
+    // and poisons later layers); the query mask below zeroes their output.
     std::vector<float>& mh = pool.alloc_f32((size_t)B * T * P);
     for (int b = 0; b < B; ++b) {
         const int vl = valid_len[b];
-        for (int t = 0; t < T; ++t)
+        for (int t = 0; t < T; ++t) {
+            const bool dead_row = (t - att_left >= vl);
             for (int c = 0; c < P; ++c) {
                 const int key = t - att_left + c;
-                mh[(size_t)b * T * P + (size_t)t * P + c] = (key >= 0 && key < vl) ? 0.0f : -INFINITY;
+                mh[(size_t)b * T * P + (size_t)t * P + c] =
+                    (dead_row || (key >= 0 && key < vl)) ? 0.0f : -INFINITY;
             }
+        }
     }
     int64_t mne[4] = {P, T, 1, B};
     ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 4, mne,
@@ -492,13 +518,22 @@ ggml_tensor* RelPosAttention::build_graph_local(ggml_context* ctx, ggml_tensor* 
         ggml_tensor* scores = ggml_add(ctx, ac, bd);    // [P, T, H]
 
         // Band mask [P, T]: 0 if key in [0, valid_len), else -inf (covers the
-        // out-of-sequence window corners and pad frames).
+        // out-of-sequence window corners and pad frames). A padded query row
+        // whose ENTIRE band lies beyond valid_len (pad tail > att_left, i.e. a
+        // short item in a heavily padded batch) must NOT be all -inf: softmax
+        // would yield NaN, the post-softmax query mask keeps NaN (NaN*0), and
+        // the NaN keys poison later layers' valid frames. Leave such rows fully
+        // unmasked instead — their finite garbage output is zeroed by the query
+        // mask below.
         std::vector<float>& mh = pool.alloc_f32((size_t)P * T);
-        for (int t = 0; t < T; ++t)
+        for (int t = 0; t < T; ++t) {
+            const bool dead_row = (t - att_left >= valid_len);
             for (int c = 0; c < P; ++c) {
                 const int key = t - att_left + c;
-                mh[(size_t)t * P + c] = (key >= 0 && key < valid_len) ? 0.0f : -INFINITY;
+                mh[(size_t)t * P + c] =
+                    (dead_row || (key >= 0 && key < valid_len)) ? 0.0f : -INFINITY;
             }
+        }
         int64_t mne[2] = {P, T};
         ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mne,
                                 mh.data(), mh.size() * sizeof(float));
@@ -628,13 +663,20 @@ ggml_tensor* RelPosAttention::build_graph_local_chunked(
     ggml_tensor* bd = ggml_mul_mat(ctx, php, qv);   // [P, T, H]
     ggml_tensor* scores = ggml_add(ctx, ac, bd);    // [P, T, H]
 
-    // Band mask [P, T]: 0 if key in [0, valid_len), else -inf.
+    // Band mask [P, T]: 0 if key in [0, valid_len), else -inf. As in
+    // build_graph_local: a padded query row whose entire band lies beyond
+    // valid_len must not be all -inf (softmax -> NaN, NaN*0 stays NaN and
+    // poisons later layers through the key path); leave such rows fully
+    // unmasked — the query mask below zeroes their output.
     std::vector<float>& mh = pool.alloc_f32((size_t)P * T);
-    for (int t = 0; t < T; ++t)
+    for (int t = 0; t < T; ++t) {
+        const bool dead_row = (t - att_left >= valid_len);
         for (int c = 0; c < P; ++c) {
             const int key = t - att_left + c;
-            mh[(size_t)t * P + c] = (key >= 0 && key < valid_len) ? 0.0f : -INFINITY;
+            mh[(size_t)t * P + c] =
+                (dead_row || (key >= 0 && key < valid_len)) ? 0.0f : -INFINITY;
         }
+    }
     int64_t mne[2] = {P, T};
     ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mne,
                             mh.data(), mh.size() * sizeof(float));

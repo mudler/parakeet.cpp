@@ -5,6 +5,7 @@
 #include "mel.hpp"        // pk::MelFrontend
 
 #include "transcription.hpp"  // pk::Transcription, pk::Word
+#include "transcription_json.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +32,10 @@
 //     Added stream_drain_events / free_events (typed per-event records) and
 //     the "events" array in the stream_feed_json / stream_finalize_json
 //     documents.
-#define PARAKEET_CAPI_ABI_VERSION 5
+// v6: transcribe_pcm_logits, exposing the CTC head's log-prob matrix (row-major
+//     [T, vocab+1], already log-softmaxed) instead of decoded text, freed with
+//     the new free_logits. Original entry points unchanged.
+#define PARAKEET_CAPI_ABI_VERSION 6
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -115,93 +119,6 @@ char* dup_to_c(const std::string& s) {
     std::memcpy(buf, s.data(), s.size());
     buf[s.size()] = '\0';
     return buf;
-}
-
-// Append `s` to `out` as a JSON string literal (with surrounding quotes),
-// escaping `"`, `\\`, and control characters (< 0x20) per RFC 8259. UTF-8
-// multibyte sequences (>= 0x80) pass through verbatim.
-void append_json_string(std::string& out, const std::string& s) {
-    out += '"';
-    char esc[8];
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    std::snprintf(esc, sizeof(esc), "\\u%04x", (unsigned)c);
-                    out += esc;
-                } else {
-                    out += (char)c;
-                }
-        }
-    }
-    out += '"';
-}
-
-// Append an int to `out` as a bare JSON number.
-void append_json_int(std::string& out, int v) {
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%d", v);
-    out += buf;
-}
-
-// Append a float to `out` formatted with `fmt` (e.g. "%.3f"). NaN/Inf are
-// emitted as 0 (JSON has no NaN/Inf literal); confidences/times are finite here.
-void append_json_float(std::string& out, const char* fmt, float v) {
-    char buf[32];
-    if (!(v == v) || v > 1e30f || v < -1e30f) {  // NaN or huge -> 0
-        out += '0';
-        return;
-    }
-    std::snprintf(buf, sizeof(buf), fmt, v);
-    out += buf;
-}
-
-// Serialize a pk::Transcription to the C-API JSON document (see the header doc
-// on parakeet_capi_transcribe_path_json). Hand-rolled (no JSON library): times
-// (word start/end, token t) with %.3f, confidences with %.4f.
-std::string transcription_to_json(const pk::Transcription& tr, float frame_sec) {
-    std::string out;
-    out.reserve(80 + tr.words.size() * 48 + tr.tokens.size() * 40);
-    out += "{\"text\":";
-    append_json_string(out, tr.text);
-    // Encoder frame stride in seconds; lets consumers convert a frame-unit
-    // segment gap threshold (NeMo segment_gap_threshold) to the seconds gap
-    // between words when forming segments.
-    out += ",\"frame_sec\":";
-    append_json_float(out, "%.6f", frame_sec);
-    out += ",\"words\":[";
-    for (size_t i = 0; i < tr.words.size(); ++i) {
-        if (i) out += ',';
-        out += "{\"w\":";
-        append_json_string(out, tr.words[i].text);
-        out += ",\"start\":";
-        append_json_float(out, "%.3f", tr.words[i].start);
-        out += ",\"end\":";
-        append_json_float(out, "%.3f", tr.words[i].end);
-        out += ",\"conf\":";
-        append_json_float(out, "%.4f", tr.words[i].conf);
-        out += '}';
-    }
-    out += "],\"tokens\":[";
-    for (size_t i = 0; i < tr.tokens.size(); ++i) {
-        if (i) out += ',';
-        out += "{\"id\":";
-        append_json_int(out, tr.tokens[i].id);
-        out += ",\"t\":";
-        append_json_float(out, "%.3f", (float)tr.tokens[i].frame * frame_sec);
-        out += ",\"conf\":";
-        append_json_float(out, "%.4f", tr.tokens[i].conf);
-        out += '}';
-    }
-    out += "]}";
-    return out;
 }
 
 } // namespace
@@ -291,6 +208,48 @@ extern "C" char* parakeet_capi_transcribe_pcm(parakeet_ctx* ctx, const float* sa
                                              decoder, nullptr);
 }
 
+extern "C" int parakeet_capi_transcribe_pcm_logits(parakeet_ctx* ctx,
+                                                    const float* samples, int n_samples,
+                                                    int sample_rate, float** out_logits,
+                                                    int* out_T, int* out_vocab_plus_1) {
+    if (!ctx) return 1;
+    if (!out_logits || !out_T || !out_vocab_plus_1) {
+        ctx->last_error = "invalid output pointer(s)";
+        return 1;
+    }
+    *out_logits = nullptr;
+    *out_T = 0;
+    *out_vocab_plus_1 = 0;
+    if (!ctx->model) { ctx->last_error = "context has no loaded model"; return 1; }
+    if (!samples || n_samples < 0) { ctx->last_error = "invalid samples buffer"; return 1; }
+    try {
+        std::vector<float> pcm(samples, samples + n_samples);
+        std::vector<float> logits;
+        int T = 0, vocab_plus_1 = 0;
+        ctx->model->transcribe_pcm_ctc_logits(pcm, sample_rate, logits, T, vocab_plus_1);
+
+        float* buf = static_cast<float*>(std::malloc(logits.size() * sizeof(float)));
+        if (!buf) { ctx->last_error = "out of memory"; return 1; }
+        std::memcpy(buf, logits.data(), logits.size() * sizeof(float));
+
+        ctx->last_error.clear();
+        *out_logits = buf;
+        *out_T = T;
+        *out_vocab_plus_1 = vocab_plus_1;
+        return 0;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return 1;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return 1;
+    }
+}
+
+extern "C" void parakeet_capi_free_logits(float* logits) {
+    std::free(logits);
+}
+
 extern "C" int parakeet_capi_transcribe_pcm_batch_lang(parakeet_ctx* ctx,
                                                        const float* const* samples,
                                                        const int* n_samples, int n_clips,
@@ -364,7 +323,7 @@ extern "C" char* parakeet_capi_transcribe_path_json(parakeet_ctx* ctx,
         const pk::ParakeetConfig& cfg = ctx->model->config();
         const float frame_sec =
             (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
-        std::string json = transcription_to_json(tr, frame_sec);
+        std::string json = pk::transcription_to_json(tr, frame_sec);
         ctx->last_error.clear();
         char* out = dup_to_c(json);
         if (!out) { ctx->last_error = "out of memory"; return nullptr; }
@@ -405,7 +364,7 @@ extern "C" char* parakeet_capi_transcribe_pcm_batch_json_lang(parakeet_ctx* ctx,
         std::string json = "[";
         for (size_t i = 0; i < trs.size(); ++i) {
             if (i) json += ',';
-            json += transcription_to_json(trs[i], frame_sec);
+            json += pk::transcription_to_json(trs[i], frame_sec);
         }
         json += "]";
         ctx->last_error.clear();
@@ -426,6 +385,87 @@ extern "C" char* parakeet_capi_transcribe_pcm_batch_json(parakeet_ctx* ctx,
     return parakeet_capi_transcribe_pcm_batch_json_lang(ctx, samples_concat, n_samples,
                                                         n_clips, sample_rate, decoder,
                                                         nullptr);
+}
+
+extern "C" char* parakeet_capi_transcribe_path_nbest_json(
+        parakeet_ctx* ctx, const char* wav_path,
+        int beam_size, int nbest, int score_norm, const char* target_lang) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) {
+        ctx->last_error = "context has no loaded model";
+        return nullptr;
+    }
+    if (!wav_path) {
+        ctx->last_error = "wav_path is NULL";
+        return nullptr;
+    }
+    try {
+        const bool normalize = score_norm != 0;
+        const std::string lang = target_lang ? target_lang : "";
+        std::vector<pk::NBestTranscription> hypotheses =
+            ctx->model->transcribe_path_nbest(
+                wav_path, beam_size, nbest, normalize, lang);
+        const pk::ParakeetConfig& cfg = ctx->model->config();
+        const float frame_sec =
+            (float)cfg.hop_length * (float)cfg.subsampling_factor /
+            (float)cfg.sample_rate;
+        std::string json = pk::nbest_transcriptions_to_json(
+            hypotheses, beam_size, normalize, frame_sec);
+        ctx->last_error.clear();
+        char* out = dup_to_c(json);
+        if (!out) {
+            ctx->last_error = "out of memory";
+            return nullptr;
+        }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
+}
+
+extern "C" char* parakeet_capi_transcribe_pcm_nbest_json(
+        parakeet_ctx* ctx, const float* samples, int n_samples, int sample_rate,
+        int beam_size, int nbest, int score_norm, const char* target_lang) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) {
+        ctx->last_error = "context has no loaded model";
+        return nullptr;
+    }
+    if (!samples || n_samples < 0) {
+        ctx->last_error = "invalid samples buffer";
+        return nullptr;
+    }
+    try {
+        const bool normalize = score_norm != 0;
+        const std::string lang = target_lang ? target_lang : "";
+        const std::vector<float> pcm(samples, samples + n_samples);
+        std::vector<pk::NBestTranscription> hypotheses =
+            ctx->model->transcribe_pcm_nbest(
+                pcm, sample_rate, beam_size, nbest, normalize, lang);
+        const pk::ParakeetConfig& cfg = ctx->model->config();
+        const float frame_sec =
+            (float)cfg.hop_length * (float)cfg.subsampling_factor /
+            (float)cfg.sample_rate;
+        std::string json = pk::nbest_transcriptions_to_json(
+            hypotheses, beam_size, normalize, frame_sec);
+        ctx->last_error.clear();
+        char* out = dup_to_c(json);
+        if (!out) {
+            ctx->last_error = "out of memory";
+            return nullptr;
+        }
+        return out;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,35 +690,35 @@ std::string stream_json(const std::string& text, int eou, int eob,
     std::string out;
     out.reserve(80 + events.size() * 36 + words.size() * 48);
     out += "{\"text\":";
-    append_json_string(out, text);
+    pk::append_json_string(out, text);
     out += ",\"eou\":";
     out += (eou ? "1" : "0");
     out += ",\"eob\":";
     out += (eob ? "1" : "0");
     out += ",\"frame_sec\":";
-    append_json_float(out, "%.6f", frame_sec);
+    pk::append_json_float(out, "%.6f", frame_sec);
     out += ",\"events\":[";
     for (size_t i = 0; i < events.size(); ++i) {
         if (i) out += ',';
         out += "{\"type\":";
         out += events[i].is_eob ? "\"eob\"" : "\"eou\"";
         out += ",\"frame\":";
-        append_json_int(out, events[i].encoder_frame);
+        pk::append_json_int(out, events[i].encoder_frame);
         out += ",\"t\":";
-        append_json_float(out, "%.3f", (float)events[i].time_sec);
+        pk::append_json_float(out, "%.3f", (float)events[i].time_sec);
         out += '}';
     }
     out += "],\"words\":[";
     for (size_t i = 0; i < words.size(); ++i) {
         if (i) out += ',';
         out += "{\"w\":";
-        append_json_string(out, words[i].text);
+        pk::append_json_string(out, words[i].text);
         out += ",\"start\":";
-        append_json_float(out, "%.3f", words[i].start);
+        pk::append_json_float(out, "%.3f", words[i].start);
         out += ",\"end\":";
-        append_json_float(out, "%.3f", words[i].end);
+        pk::append_json_float(out, "%.3f", words[i].end);
         out += ",\"conf\":";
-        append_json_float(out, "%.4f", words[i].conf);
+        pk::append_json_float(out, "%.4f", words[i].conf);
         out += '}';
     }
     out += "]}";

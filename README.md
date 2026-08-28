@@ -88,13 +88,19 @@ Every [release](https://github.com/mudler/parakeet.cpp/releases) ships pre-built
 
 | Platform | Variants |
 | -------- | -------- |
-| Linux x64 | cpu, vulkan, cuda, rocm |
+| Linux x64 | cpu, vulkan, cuda, cuda12, rocm |
 | Linux arm64 | cpu |
 | macOS arm64 | metal |
 | macOS x64 | cpu |
 | Windows x64 | cpu, vulkan, cuda |
 
-The cuda bundles target Turing (sm_75) and newer, including Blackwell. On Linux the CUDA runtime libraries are bundled in the tarball; on Windows download the `cudart-parakeet-bin-win-cuda-x64.zip` asset alongside the binary zip unless you already have the CUDA toolkit installed. The vulkan binaries need the Vulkan loader on the system (`libvulkan1` on Debian/Ubuntu; on Windows the GPU driver provides it).
+The cuda bundles target Turing (sm_75) and newer, including Blackwell. The
+Linux `cuda12` bundle retains CUDA 12 coverage for older Volta systems. On
+Linux the CUDA runtime libraries are bundled in the tarball; on Windows
+download the `cudart-parakeet-bin-win-cuda-x64.zip` asset alongside the binary
+zip unless you already have the CUDA toolkit installed. The vulkan binaries
+need the Vulkan loader on the system (`libvulkan1` on Debian/Ubuntu; on Windows
+the GPU driver provides it).
 
 The Linux x64 ROCm release provides these thin archives:
 
@@ -141,6 +147,7 @@ cmake --build build-shared -j
 | `PARAKEET_BUILD_TESTS`   | OFF     | Compile and register ctest targets         |
 | `PARAKEET_BUILD_CLI`     | ON      | Build `parakeet-cli`                       |
 | `PARAKEET_SHARED`        | OFF     | Build libparakeet as a shared library      |
+| `PARAKEET_VERSION`       | 0.0.1   | Version string returned by `--version`     |
 | `PARAKEET_GGML_CUDA`     | OFF     | Forward GGML_CUDA to the submodule         |
 | `PARAKEET_GGML_METAL`    | OFF     | Forward GGML_METAL to the submodule        |
 | `PARAKEET_GGML_VULKAN`   | OFF     | Forward GGML_VULKAN to the submodule       |
@@ -186,9 +193,10 @@ Two prebuilt images are published to GitHub Container Registry on every push to 
 - `ghcr.io/mudler/parakeet.cpp-cli`: the command-line transcriber.
 - `ghcr.io/mudler/parakeet.cpp-server`: the [OpenAI-compatible server](#openai-compatible-server).
 
-Each image has CPU, CUDA, and ROCm variants. CPU and CUDA are multi-arch
-(`linux/amd64` and `linux/arm64`). ROCm is `linux/amd64` only. ROCm tags use
-`latest-rocm`, `<version>-rocm`, and `<sha>-rocm`, where `<sha>` has the
+Each image has CPU, CUDA 13, CUDA 12, and ROCm variants. CPU and both CUDA
+variants are multi-arch (`linux/amd64` and `linux/arm64`). CUDA 12 tags use
+the `-cuda12` suffix. ROCm is `linux/amd64` only; its tags use `latest-rocm`,
+`<version>-rocm`, and `<sha>-rocm`, where `<sha>` has the
 `sha-<short-commit>` form. The images contain no models, so mount a converted
 `.gguf` model at runtime. Also mount the audio when you use the CLI.
 
@@ -316,6 +324,13 @@ parakeet-cli transcribe --model m.gguf --input audio.wav --timestamps
 #    "tokens":[{"id":..,"t":..,"conf":..}]}
 parakeet-cli transcribe --model m.gguf --input audio.wav --json
 
+# Offline TDT N-best hypotheses as ranked JSON
+parakeet-cli transcribe --model m.gguf --input audio.wav --decoder tdt \
+  --beam-size 4 --nbest 4
+
+# Read WAV bytes from stdin (useful with ffmpeg/curl pipelines)
+ffmpeg -i input.mp3 -f wav - | parakeet-cli transcribe --model m.gguf --input -
+
 # Print model metadata (arch, dims, mel params, vocab size, TDT durations)
 parakeet-cli info m.gguf
 
@@ -327,6 +342,10 @@ parakeet-cli transcribe --model eou.gguf --input audio.wav --stream
 ```
 
 Timestamps and confidence match NeMo's `transcribe(timestamps=True)` with the `max_prob` confidence method exactly (word offsets to 0.0 s, per-token and per-word confidence within `5e-6`), for both the TDT and CTC heads. See `docs/parity.md`. Word start and end are in seconds (`frame x hop x subsampling / sample_rate`, which works out to 0.08 s/frame here); confidence is the rescaled softmax probability of the emitted token, aggregated per word with NeMo's `min`.
+
+The optional TDT beam decoder follows NeMo's default sequence-level beam
+search and exposes raw/normalized scores plus token frame/duration metadata.
+See [`docs/tdt-nbest.md`](docs/tdt-nbest.md).
 
 The `parakeet-cli` binary lands at `build/examples/cli/parakeet-cli`.
 

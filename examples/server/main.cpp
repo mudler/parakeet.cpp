@@ -2,6 +2,7 @@
 #include "model_fetch.hpp"
 #include "openai_format.hpp"
 
+#include "parakeet.h"        // parakeet_version
 #include "model.hpp"          // pk::Model
 #include "transcription.hpp"  // pk::Transcription
 #include "ggml_graph.hpp"     // pk::set_num_threads, pk::shutdown_backend
@@ -71,6 +72,10 @@ int main(int argc, char** argv) {
         else if (a == "--threads") threads = std::atoi(next("--threads").c_str());
         else if (a == "--cache-dir") cache_dir = next("--cache-dir");
         else if (a == "-h" || a == "--help") { usage(); return 0; }
+        else if (a == "--version" || a == "-V") {
+            std::printf("parakeet-server %s\n", parakeet_version());
+            return 0;
+        }
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); usage(); return 2; }
     }
     if (model_arg.empty()) { usage(); return 2; }

@@ -10,4 +10,11 @@ namespace pk {
 // sentencepiece::SentencePieceProcessor::decode_ids.
 std::string detokenize(const std::vector<std::string>& pieces,
                        const std::vector<int32_t>& ids);
+
+// Drop ids whose piece is a bracketed special token (`<...>` or `[...]`, e.g.
+// language tags like `<en-US>` or `<EOU>`), so they never reach detokenize().
+// Ordinary SentencePiece content tokens (including `▁`-prefixed word starts)
+// are left untouched.
+std::vector<int32_t> strip_special_tokens(const std::vector<std::string>& pieces,
+                                          const std::vector<int32_t>& ids);
 } // namespace pk
