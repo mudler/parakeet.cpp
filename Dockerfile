@@ -66,6 +66,8 @@ RUN if [ "$ENABLE_ROCM" = "1" ]; then \
             | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg; \
         echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
             > /etc/apt/sources.list.d/rocm.list; \
+        printf '%s\n' 'Package: *' 'Pin: release o=repo.radeon.com' \
+            'Pin-Priority: 600' > /etc/apt/preferences.d/rocm-pin-600; \
         apt-get update; \
         apt-get install -y --no-install-recommends \
             hipcc \
@@ -139,6 +141,8 @@ RUN if [ "$ENABLE_ROCM" = "1" ]; then \
             | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg; \
         echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
             > /etc/apt/sources.list.d/rocm.list; \
+        printf '%s\n' 'Package: *' 'Pin: release o=repo.radeon.com' \
+            'Pin-Priority: 600' > /etc/apt/preferences.d/rocm-pin-600; \
         apt-get update; \
         apt-get install -y --no-install-recommends \
             rocm-hip-runtime \

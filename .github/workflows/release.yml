@@ -146,6 +146,8 @@ jobs:
             | sudo tee /etc/apt/keyrings/rocm.gpg >/dev/null
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/7.2.4 noble main" \
             | sudo tee /etc/apt/sources.list.d/rocm.list
+          printf '%s\n' 'Package: *' 'Pin: release o=repo.radeon.com' 'Pin-Priority: 600' \
+            | sudo tee /etc/apt/preferences.d/rocm-pin-600 >/dev/null
           sudo apt-get update
           sudo apt-get install -y hipcc hip-dev rocm-device-libs hipblas-dev rocblas-dev
           echo "/opt/rocm/bin" >> "$GITHUB_PATH"

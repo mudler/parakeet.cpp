@@ -37,6 +37,7 @@ class RocmDockerfileTest(unittest.TestCase):
             r'(?s)if \[ "\$ENABLE_ROCM" = "1" \]; then.*?'
             r"https://repo\.radeon\.com/rocm/rocm\.gpg\.key.*?"
             r"https://repo\.radeon\.com/rocm/apt/\$\{ROCM_VERSION\} noble main.*?"
+            r"Pin-Priority: 600.*?"
             r"apt-get install -y --no-install-recommends\s+"
             r"hipcc\s+hip-dev\s+rocm-device-libs\s+hipblas-dev\s+rocblas-dev",
         )
@@ -62,6 +63,7 @@ class RocmDockerfileTest(unittest.TestCase):
             commands,
             r'(?s)if \[ "\$ENABLE_ROCM" = "1" \]; then.*?'
             r"https://repo\.radeon\.com/rocm/apt/\$\{ROCM_VERSION\} noble main.*?"
+            r"Pin-Priority: 600.*?"
             r"apt-get install -y --no-install-recommends\s+"
             r"rocm-hip-runtime\s+rocm-hip-libraries",
         )

@@ -155,6 +155,7 @@ check_origin_rpath staged.so
         self.assertIn("if: matrix.backend == 'rocm'", install)
         self.assertIn("https://repo.radeon.com/rocm/rocm.gpg.key", install)
         self.assertIn("https://repo.radeon.com/rocm/apt/7.2.4 noble main", install)
+        self.assertIn("Pin-Priority: 600", install)
         packages = re.search(r"sudo apt-get install -y (?P<packages>[^\n]+)", install)
         self.assertIsNotNone(packages)
         self.assertEqual(
