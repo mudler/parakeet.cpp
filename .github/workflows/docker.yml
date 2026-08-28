@@ -7,7 +7,8 @@ name: docker
 # Both come from the same Dockerfile (shared build stage, different runtime
 # target), so ggml is compiled once per build job.
 #
-# Each variant (cpu, cuda) is a multi-arch image (linux/amd64 + linux/arm64).
+# CPU and CUDA are multi-arch images (linux/amd64 + linux/arm64); ROCm is
+# linux/amd64 only.
 # Every arch is built natively on its own runner (no QEMU): amd64 on
 # ubuntu-24.04, arm64 on ubuntu-24.04-arm. The per-arch images are pushed by
 # digest, then a merge job assembles one multi-arch manifest per (image,
@@ -20,7 +21,8 @@ name: docker
 # pull_request builds the CPU variant only, as a fast Dockerfile gate. The CUDA
 # build takes tens of minutes (it compiles many GPU architectures), so it runs
 # only on push to the default branch, tags, and manual dispatch, all of which
-# also push the image. Use workflow_dispatch to exercise CUDA before merging.
+# also push the image. Use workflow_dispatch to exercise GPU variants before
+# merging.
 on:
   push:
     branches: [master]
@@ -39,7 +41,7 @@ env:
 jobs:
   # -------------------------------------------------------------------------
   # setup: choose the build matrix for this event. PRs get CPU only (fast
-  # gate); everything else gets CPU + CUDA.
+  # gate); everything else gets CPU + CUDA + ROCm.
   # -------------------------------------------------------------------------
   setup:
     runs-on: ubuntu-latest
@@ -54,10 +56,13 @@ jobs:
           # the build container has no GPU driver. amd64 takes ggml's default
           # (broad) arch list; arm64 only targets Grace GPUs (Hopper + GB10).
           CUDA='{"variant":"cuda","arch":"amd64","runner":"ubuntu-24.04","build_base":"nvidia/cuda:13.0.1-devel-ubuntu24.04","runtime_base":"nvidia/cuda:13.0.1-runtime-ubuntu24.04","cmake_args":"-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON","cuda_archs":""},{"variant":"cuda","arch":"arm64","runner":"ubuntu-24.04-arm","build_base":"nvidia/cuda:13.0.1-devel-ubuntu24.04","runtime_base":"nvidia/cuda:13.0.1-runtime-ubuntu24.04","cmake_args":"-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON","cuda_archs":"90;121-real"}'
+          # ROCm 7.2.4 publishes x86_64 packages. Build all supported targets
+          # into one portable HIP backend and ship its runtime in the image.
+          ROCM='{"variant":"rocm","arch":"amd64","runner":"ubuntu-24.04","build_base":"ubuntu:24.04","runtime_base":"ubuntu:24.04","cmake_args":"-DBUILD_SHARED_LIBS=ON -DPARAKEET_GGML_HIP=ON -DGGML_HIP_NO_VMM=ON -DCMAKE_HIP_COMPILER=/opt/rocm/lib/llvm/bin/clang++ -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm-7.2.4","cuda_archs":"","enable_rocm":"1","gpu_targets":"gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"}'
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "matrix={\"include\":[${CPU}]}" >> "$GITHUB_OUTPUT"
           else
-            echo "matrix={\"include\":[${CPU},${CUDA}]}" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[${CPU},${CUDA},${ROCM}]}" >> "$GITHUB_OUTPUT"
           fi
 
   # -------------------------------------------------------------------------
@@ -108,6 +113,9 @@ jobs:
             RUNTIME_BASE=${{ matrix.runtime_base }}
             CMAKE_EXTRA_ARGS=${{ matrix.cmake_args }}
             CUDA_ARCHS=${{ matrix.cuda_archs }}
+            ENABLE_ROCM=${{ matrix.enable_rocm }}
+            ROCM_VERSION=7.2.4
+            GPU_TARGETS=${{ matrix.gpu_targets }}
           # PRs: build only (cache-only, nothing pushed). Otherwise push the
           # image by digest so the merge job can stitch the arches together.
           outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_CLI) || 'type=cacheonly' }}
@@ -127,6 +135,9 @@ jobs:
             RUNTIME_BASE=${{ matrix.runtime_base }}
             CMAKE_EXTRA_ARGS=${{ matrix.cmake_args }}
             CUDA_ARCHS=${{ matrix.cuda_archs }}
+            ENABLE_ROCM=${{ matrix.enable_rocm }}
+            ROCM_VERSION=7.2.4
+            GPU_TARGETS=${{ matrix.gpu_targets }}
           outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_SERVER) || 'type=cacheonly' }}
           cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
@@ -180,12 +191,18 @@ jobs:
           - image: cli
             variant: cuda
             suffix: "-cuda"
+          - image: cli
+            variant: rocm
+            suffix: "-rocm"
           - image: server
             variant: cpu
             suffix: ""
           - image: server
             variant: cuda
             suffix: "-cuda"
+          - image: server
+            variant: rocm
+            suffix: "-rocm"
     steps:
       - name: Resolve image name
         id: img
@@ -220,6 +237,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
           # cpu  -> latest, sha-xxxx, vX.Y.Z
           # cuda -> latest-cuda, sha-xxxx-cuda, vX.Y.Z-cuda
+          # rocm -> latest-rocm, sha-xxxx-rocm, vX.Y.Z-rocm
           flavor: |
             suffix=${{ matrix.suffix }},onlatest=true
           tags: |
