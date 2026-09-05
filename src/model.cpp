@@ -118,7 +118,7 @@ static EncodedAudio encode_16k(const ModelLoader& loader,
         mb1.n_mels = n_mels;
         mb1.T_max = T;
         mb1.valid_T = {T};
-        mb1.data = feats;
+        mb1.data = std::move(feats);
         std::vector<std::vector<float>> outputs;
         std::vector<int> valid_frames;
         int padded_frames = 0;
@@ -210,7 +210,7 @@ void Model::transcribe_16k_ctc_logits(const std::vector<float>& pcm16k,
     if (sub_tile > 0) {
         MelBatch mb1;
         mb1.B = 1; mb1.n_mels = n_mels; mb1.T_max = Tmel; mb1.valid_T = { Tmel };
-        mb1.data = feats;
+        mb1.data = std::move(feats);
         std::vector<std::vector<float>> eo; std::vector<int> vT;
         int dm1 = 0, To1 = 0;
         encoder.forward_batch_tiled(mb1, eo, dm1, To1, vT, sub_tile);
