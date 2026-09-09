@@ -66,9 +66,16 @@ struct parakeet_ctx {
 struct parakeet_stream {
     parakeet_ctx* ctx = nullptr;             // borrowed (must outlive the stream)
     std::unique_ptr<pk::StreamingMel> mel;   // incremental log-mel front end
-    std::vector<float> mel_buf;              // accumulated mel [n_mels, mel_T] feat-major
+    // mel_buf holds ONLY the still-reachable window of mel history, feat-major
+    // [n_mels, mel_T - mel_buf_origin]; column 0 is ABSOLUTE frame mel_buf_origin
+    // (see append_mel_frames / feed_available's window()). Frames strictly
+    // before mel_buffer_idx - pre_encode_cache_size() can never be read again
+    // (mel_buffer_idx only advances -- see feed_available), so they are dropped
+    // as they age out instead of being retained for the life of the stream.
+    std::vector<float> mel_buf;
     int n_mels = 0;
-    int mel_T = 0;                           // total mel frames accumulated so far
+    int mel_T = 0;                           // total mel frames accumulated so far (absolute)
+    int mel_buf_origin = 0;                  // absolute frame index of mel_buf's column 0
     std::unique_ptr<pk::StreamingSession> sess;
     int mel_buffer_idx = 0;                  // next un-fed mel frame (chunk schedule)
     bool first_chunk = true;                 // chunk 0 has no pre-encode overlap
@@ -77,25 +84,60 @@ struct parakeet_stream {
 
 namespace {
 // Append `n_new` feat-major mel frames `[n_mels, n_new]` to the stream's
-// accumulated feat-major mel buffer `[n_mels, mel_T]`, growing mel_T. Both are
-// feat-major (out[m*T + t]); appending along the time axis requires a per-row
-// rebuild since the inner stride changes when T grows.
+// accumulated feat-major mel buffer, growing mel_T, and drop the prefix that
+// feed_available's window() can provably never read again.
+//
+// ROOT CAUSE of mudler/parakeet.cpp#63 (the streaming RSS leak): the mel buffer
+// used to retain the FULL stream history from mel_buffer_idx==0 forever, so
+// this function rebuilt a `[n_mels, T]` array from scratch on EVERY stream_feed
+// call with T monotonically growing for the life of the stream -- not just O(T)
+// CPU per call (the reason this rebuild exists at all, per the original
+// comment), but a continuous sequence of UNIQUELY, EVER-LARGER-sized heap
+// allocations. A general-purpose allocator can never satisfy a strictly-larger
+// request from a smaller freed block, so the freed (now too-small) blocks from
+// every earlier call accumulate as unusable, unreturned pages instead of being
+// recycled -- the process's live working set stays tiny (a few MB) but the
+// CUMULATIVE allocator debt grows with the stream's length, which is exactly
+// why the upstream report finds it reclaimed by neither stream_free nor a
+// fresh stream_begin: it is allocator-level fragmentation from the discarded
+// buffers' sizes, not stream-owned memory.
+//
+// feed_available's window(lo, hi) only ever reads lo >= mel_buffer_idx -
+// pre_cache, and mel_buffer_idx is monotonically non-decreasing (it only moves
+// forward by chunk_size). So at the START of any call here (mel_buffer_idx
+// unchanged since the previous feed_available pass), every mel frame before
+// mel_buffer_idx - pre_cache is provably dead and safe to drop; mel_buf then
+// stays bounded to O(pre_cache + chunk_size) -- a small constant -- instead of
+// O(stream length), for the life of the stream.
 void append_mel_frames(parakeet_stream* s, const std::vector<float>& frames, int n_new) {
     if (n_new <= 0) return;
     const int n_mels = s->n_mels;
-    const int old_T = s->mel_T;
+    const int old_T = s->mel_T;                 // absolute frame count so far
     const int new_T = old_T + n_new;
-    std::vector<float> out((size_t)n_mels * new_T);
+
+    const int pre_cache = s->sess ? s->sess->pre_encode_cache_size() : 0;
+    int keep_from = s->mel_buffer_idx - pre_cache;
+    if (keep_from < s->mel_buf_origin) keep_from = s->mel_buf_origin;  // never move backward
+    if (keep_from > old_T) keep_from = old_T;                          // never past what exists
+
+    const int old_local_T = old_T - s->mel_buf_origin;   // mel_buf's current column count
+    const int drop_local   = keep_from - s->mel_buf_origin;  // columns to drop from the front
+    const int kept         = old_local_T - drop_local;       // columns carried forward
+    const int new_local_T  = kept + n_new;
+
+    std::vector<float> out((size_t)n_mels * new_local_T);
     for (int m = 0; m < n_mels; ++m) {
-        // copy existing [0, old_T)
-        for (int t = 0; t < old_T; ++t)
-            out[(size_t)m * new_T + t] = s->mel_buf[(size_t)m * old_T + t];
-        // append new [old_T, new_T)
+        // carry forward the still-reachable tail [drop_local, old_local_T)
+        for (int t = 0; t < kept; ++t)
+            out[(size_t)m * new_local_T + t] =
+                s->mel_buf[(size_t)m * old_local_T + (drop_local + t)];
+        // append the newly-arrived frames
         for (int t = 0; t < n_new; ++t)
-            out[(size_t)m * new_T + (old_T + t)] = frames[(size_t)m * n_new + t];
+            out[(size_t)m * new_local_T + (kept + t)] = frames[(size_t)m * n_new + t];
     }
     s->mel_buf.swap(out);
     s->mel_T = new_T;
+    s->mel_buf_origin = keep_from;
 }
 } // namespace
 
@@ -492,20 +534,25 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag,
     const size_t ev0 = sess.events().size();
 
     const int n_mels = s->n_mels;
-    const int T = s->mel_T;
+    const int T = s->mel_T;              // absolute total frame count
     if (T <= 0) return std::string();
-    const std::vector<float>& mel = s->mel_buf;  // [n_mels, T] feat-major
+    const int origin = s->mel_buf_origin;   // absolute index of mel_buf's column 0
+    const int local_T = T - origin;         // mel_buf's actual (bounded) column count
+    const std::vector<float>& mel = s->mel_buf;  // [n_mels, local_T] feat-major, columns [origin, T)
 
     const int chunk0     = sess.chunk_size_first();
     const int chunk_main = sess.chunk_size();
     const int pre_cache  = sess.pre_encode_cache_size();
 
+    // lo/hi are ABSOLUTE frame indices (as before); translate into mel_buf's
+    // own local (origin-relative) columns. append_mel_frames guarantees
+    // lo >= mel_buffer_idx - pre_cache is always still resident.
     auto window = [&](int lo, int hi) {
         const int len = hi - lo;
         std::vector<float> w((size_t)n_mels * len);
         for (int m = 0; m < n_mels; ++m)
             for (int t = 0; t < len; ++t)
-                w[(size_t)m * len + t] = mel[(size_t)m * T + (lo + t)];
+                w[(size_t)m * len + t] = mel[(size_t)m * local_T + (lo - origin + t)];
         return w;
     };
 
