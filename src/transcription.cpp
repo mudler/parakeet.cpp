@@ -238,4 +238,28 @@ std::vector<Word> group_words(const std::vector<TokenInfo>& tokens,
     return words;
 }
 
+size_t open_word_start(const std::vector<TokenInfo>& tokens,
+                       const std::vector<std::string>& pieces) {
+    // Same word-start rule group_words applies to select a word's first token:
+    //   (piece != decoded_text)  -> a `▁`-prefixed sub-word, i.e. word_start_cond
+    //   && decoded_text is not punctuation   -> group_words' !curr_punct guard
+    //   && decoded_text != the space delimiter -> group_words' `ct != DELIM`
+    // A `▁`-prefixed punctuation piece like `▁'` (piece != text, but text is
+    // punctuation) is therefore NOT a boundary — matching group_words, which
+    // attaches it to the preceding word instead of starting a new one.
+    const std::set<std::string> punct = extract_punctuation(pieces);
+    const std::string DELIM = " ";
+    auto is_punct = [&](const std::string& s) {
+        return !s.empty() && s != DELIM && punct.count(s) > 0;
+    };
+    for (size_t i = tokens.size(); i-- > 0;) {
+        int id = tokens[i].id;
+        if (id < 0 || (size_t)id >= pieces.size()) continue;
+        const std::string& piece = pieces[(size_t)id];
+        const std::string text = piece_to_text(piece);
+        if (piece != text && text != DELIM && !is_punct(text)) return i;
+    }
+    return 0;
+}
+
 } // namespace pk

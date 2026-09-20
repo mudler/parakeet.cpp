@@ -184,3 +184,65 @@ jobs:
               print(f"  actual:   {actual!r}")
               sys.exit(1)
           PYEOF
+
+  # -------------------------------------------------------------------------
+  # streaming-longrun: the long-running streaming regression.
+  #
+  # The bounded-cost streaming tests carry LABEL "model", so the `build` job
+  # (ctest -LE model) skips them -- the very regressions that guard the O(N^2)
+  # long-session runaway never ran anywhere. They only bite over minutes of
+  # continuous audio, so they need a real cache-aware streaming model.
+  #
+  # No NeMo and no conversion: this pulls the already-converted GGUF that the
+  # server's `eou-120m` alias points at (~254 MB f16), the smallest cache-aware
+  # streaming model in mudler/parakeet-cpp-gguf. So the job is a plain build
+  # plus a curl -- same weight as server-e2e, not as closed-loop.
+  #
+  # What the two tests assert over a multi-minute multi-utterance stream:
+  #   test_streaming_longrun_bounded  per-chunk reprocessing in StreamingSession
+  #                                   stays bounded, and the incremental text is
+  #                                   byte-identical to a full detokenize.
+  #   test_streaming_mel_bounded      the C-API's accumulated mel costs a bounded
+  #                                   amount per append and retains a bounded
+  #                                   number of frames, and the transcript is
+  #                                   byte-identical to the non-windowed
+  #                                   reference path (run_stream_over_pcm).
+  # -------------------------------------------------------------------------
+  streaming-longrun:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Configure CMake
+        run: cmake -B build -DPARAKEET_BUILD_TESTS=ON -DGGML_NATIVE=OFF
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Fetch the cache-aware streaming model (eou-120m alias)
+        run: |
+          curl -fsSL -o /tmp/pk_eou_stream.gguf \
+            https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/realtime_eou_120m-v1-f16.gguf
+
+      - name: Long-running streaming regression (bounded cost + output parity)
+        env:
+          PARAKEET_TEST_GGUF_STREAM: /tmp/pk_eou_stream.gguf
+          # 16 repeats of the speech fixture with 0.6 s gaps: a couple of minutes
+          # of continuous multi-utterance audio, enough for the per-chunk cost to
+          # visibly diverge if the O(N^2) path came back, and short enough for a
+          # hosted CPU runner. test_streaming_mel_bounded compares this against a
+          # session 8x shorter.
+          PARAKEET_TEST_STREAM_REPEATS: "16"
+        run: |
+          ctest --test-dir build --output-on-failure \
+            -R '^test_streaming_(longrun|mel)_bounded$'

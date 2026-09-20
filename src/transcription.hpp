@@ -56,4 +56,23 @@ std::vector<Word> group_words(const std::vector<TokenInfo>& tokens,
                               const std::vector<std::string>& pieces,
                               float frame_sec);
 
+// Relative index (into `tokens`) of the first token of the LAST word group_words
+// would emit from `tokens` — i.e. where the still-open (trailing) word begins.
+// Uses group_words' exact word-start rule: a token opens a word iff its raw piece
+// differs from its decoded text (a `▁`-prefixed sub-word) AND that decoded text
+// is not a punctuation mark. Returns 0 if no token qualifies (all
+// continuation/punctuation).
+//
+// StreamingSession uses this to split its accumulated word tokens into an
+// already-finalized prefix and the still-open tail without re-grouping the whole
+// session each chunk. Because group_words never merges across a word-start
+// boundary, group_words(tokens[0,idx)) ++ group_words(tokens[idx,end)) ==
+// group_words(tokens) with the second part being exactly the one open word — the
+// invariant the incremental grouping relies on. Matching group_words' rule here
+// (not just "piece starts with `▁`") is required: a `▁`-prefixed punctuation
+// piece such as `▁'` (space + opening quote) starts with `▁` yet does NOT open a
+// word, so treating it as a boundary would drop the real preceding word.
+size_t open_word_start(const std::vector<TokenInfo>& tokens,
+                       const std::vector<std::string>& pieces);
+
 } // namespace pk

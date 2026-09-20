@@ -1,4 +1,5 @@
 #include "parakeet_capi.h"
+#include "parakeet_capi_test.hpp"  // test-only mel-window diagnostics
 #include "parakeet.h"     // pk::Decoder
 #include "model.hpp"      // pk::Model
 #include "streaming.hpp"  // pk::StreamingSession
@@ -7,6 +8,7 @@
 #include "transcription.hpp"  // pk::Transcription, pk::Word
 #include "transcription_json.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -55,9 +57,11 @@ struct parakeet_ctx {
 //
 // The streaming model uses normalize="NA" (frame-local mel, no whole-utterance
 // stats), so the incremental mel is bit-identical to MelFrontend::compute on the
-// full clip (see tests/test_streaming_mel.cpp); only the accumulated mel frames
-// (NOT the raw PCM) are retained, and StreamingMel itself keeps only ~n_fft
-// recent samples.
+// full clip (see tests/test_streaming_mel.cpp); no raw PCM is retained,
+// StreamingMel itself keeps only ~n_fft recent samples, and the mel buffer is a
+// bounded sliding window over the frames the chunk schedule can still read (see
+// append_mel_frames) -- so memory and per-chunk cost do NOT grow with session
+// length.
 //
 // `finalize` appends StreamingMel's end zero-pad tail frames, then flushes the
 // streaming decoder tail: it decodes the final (partial) chunk with
@@ -66,38 +70,117 @@ struct parakeet_ctx {
 struct parakeet_stream {
     parakeet_ctx* ctx = nullptr;             // borrowed (must outlive the stream)
     std::unique_ptr<pk::StreamingMel> mel;   // incremental log-mel front end
-    std::vector<float> mel_buf;              // accumulated mel [n_mels, mel_T] feat-major
+    // Accumulated mel as a feat-major SLIDING WINDOW over the frames the chunk
+    // schedule can still read. Row m occupies [m*mel_cap, (m+1)*mel_cap), and
+    // absolute mel frame t sits at column (t - mel_base); the live range is
+    // [mel_base, mel_T). Keeping the row stride FIXED (mel_cap, not the current
+    // frame count) is what lets an append be a memcpy per row instead of a
+    // rebuild of the whole buffer -- see append_mel_frames.
+    std::vector<float> mel_buf;
     int n_mels = 0;
+    int mel_cap = 0;                         // frames reserved per row
+    int mel_base = 0;                        // absolute frame index of column 0
     int mel_T = 0;                           // total mel frames accumulated so far
+    // Scratch for the mel window handed to feed_mel_chunk, reused across chunks
+    // so a live stream does not allocate one per chunk.
+    std::vector<float> chunk_buf;
     std::unique_ptr<pk::StreamingSession> sess;
     int mel_buffer_idx = 0;                  // next un-fed mel frame (chunk schedule)
     bool first_chunk = true;                 // chunk 0 has no pre-encode overlap
     bool finalized = false;
+    // Test-only high-water marks; see parakeet_capi_test.hpp.
+    size_t test_mel_copy_max = 0;            // floats moved by one append
+    size_t test_mel_frames_held_max = 0;     // frames the window retained
 };
 
+// Floor for the mel window capacity (frames per row). Small enough to stay
+// negligible (n_mels * 256 floats ~ 128 kB), large enough that a rebuild is
+// rare next to the ~8 mel frames an 80 ms PCM chunk produces.
+static const int kMelCapMin = 256;
+
 namespace {
-// Append `n_new` feat-major mel frames `[n_mels, n_new]` to the stream's
-// accumulated feat-major mel buffer `[n_mels, mel_T]`, growing mel_T. Both are
-// feat-major (out[m*T + t]); appending along the time axis requires a per-row
-// rebuild since the inner stride changes when T grows.
+
+// The oldest mel frame the chunk schedule can still read, given `mel_buffer_idx`
+// (the next un-fed frame). Chunk 0 has no pre-encode overlap and starts exactly
+// at mel_buffer_idx; every later chunk reaches back pre_cache frames for the
+// encoder's left context. mel_buffer_idx only ever moves forward, so nothing
+// below this can be read again.
+//
+// feed_available windows each chunk from here, and append_mel_frames prunes
+// below it -- the same rule, so they cannot drift apart.
+int oldest_needed_mel_frame(int mel_buffer_idx, int pre_cache, bool first_chunk) {
+    if (first_chunk) return mel_buffer_idx;
+    return std::max(0, mel_buffer_idx - pre_cache);
+}
+
+// Append `n_new` feat-major mel frames `[n_mels, n_new]` to the stream's mel
+// sliding window and advance mel_T.
+//
+// Two things keep this O(1) amortized per frame instead of O(T) per chunk:
+//
+//  * FIXED row stride. mel_buf reserves mel_cap frames per row, so the new
+//    frames go in with one memcpy per row into the free tail; the existing
+//    history is not touched. The stride only changes when the window is rebuilt.
+//
+//  * PREFIX PRUNING. Everything below oldest_needed_mel_frame() is dead, so the
+//    window drops it. Without pruning the buffer grows for the whole session
+//    (~184 MB/h of dictation) even though only the last few frames are ever
+//    read again.
+//
+// When the free tail runs out the window is rebuilt once: the dead prefix is
+// dropped and the capacity is grown to at least twice the live content, so at
+// least half the capacity is free afterwards and the rebuild cost is amortized
+// over the frames that fill it.
 void append_mel_frames(parakeet_stream* s, const std::vector<float>& frames, int n_new) {
     if (n_new <= 0) return;
     const int n_mels = s->n_mels;
-    const int old_T = s->mel_T;
-    const int new_T = old_T + n_new;
-    std::vector<float> out((size_t)n_mels * new_T);
-    for (int m = 0; m < n_mels; ++m) {
-        // copy existing [0, old_T)
-        for (int t = 0; t < old_T; ++t)
-            out[(size_t)m * new_T + t] = s->mel_buf[(size_t)m * old_T + t];
-        // append new [old_T, new_T)
-        for (int t = 0; t < n_new; ++t)
-            out[(size_t)m * new_T + (old_T + t)] = frames[(size_t)m * n_new + t];
+    if (n_mels <= 0) return;
+
+    const int pre_cache = s->sess ? s->sess->pre_encode_cache_size() : 0;
+    int keep_from = oldest_needed_mel_frame(s->mel_buffer_idx, pre_cache, s->first_chunk);
+    if (keep_from < s->mel_base) keep_from = s->mel_base;
+    if (keep_from > s->mel_T)    keep_from = s->mel_T;
+
+    size_t copied = 0;
+    if (s->mel_T - s->mel_base + n_new > s->mel_cap) {
+        const int keep = s->mel_T - keep_from;   // live frames to carry over
+        const int off  = keep_from - s->mel_base;
+        int cap = s->mel_cap;
+        if (cap < kMelCapMin) cap = kMelCapMin;
+        while (cap < 2 * (keep + n_new)) cap *= 2;
+
+        std::vector<float> out((size_t)n_mels * cap);
+        if (keep > 0)
+            for (int m = 0; m < n_mels; ++m)
+                std::memcpy(&out[(size_t)m * cap],
+                            &s->mel_buf[(size_t)m * s->mel_cap + off],
+                            (size_t)keep * sizeof(float));
+        s->mel_buf.swap(out);
+        s->mel_cap  = cap;
+        s->mel_base = keep_from;
+        copied += (size_t)n_mels * (size_t)(keep > 0 ? keep : 0);
     }
-    s->mel_buf.swap(out);
-    s->mel_T = new_T;
+
+    const int dst = s->mel_T - s->mel_base;      // first free column
+    for (int m = 0; m < n_mels; ++m)
+        std::memcpy(&s->mel_buf[(size_t)m * s->mel_cap + dst],
+                    &frames[(size_t)m * n_new],
+                    (size_t)n_new * sizeof(float));
+    copied += (size_t)n_mels * (size_t)n_new;
+    s->mel_T += n_new;
+
+    if (copied > s->test_mel_copy_max) s->test_mel_copy_max = copied;
+    const size_t held = (size_t)(s->mel_T - s->mel_base);
+    if (held > s->test_mel_frames_held_max) s->test_mel_frames_held_max = held;
 }
 } // namespace
+
+extern "C" unsigned long long parakeet_capi_test_mel_max_copy(parakeet_stream* s) {
+    return s ? (unsigned long long)s->test_mel_copy_max : 0;
+}
+extern "C" unsigned long long parakeet_capi_test_mel_max_frames_held(parakeet_stream* s) {
+    return s ? (unsigned long long)s->test_mel_frames_held_max : 0;
+}
 
 namespace {
 
@@ -494,19 +577,28 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag,
     const int n_mels = s->n_mels;
     const int T = s->mel_T;
     if (T <= 0) return std::string();
-    const std::vector<float>& mel = s->mel_buf;  // [n_mels, T] feat-major
+    // The mel sliding window: row stride mel_cap, absolute frame t at column
+    // (t - mel_base). append_mel_frames prunes by the same
+    // oldest_needed_mel_frame() rule used below, so every frame this schedule
+    // still reads is inside [mel_base, mel_T).
+    const std::vector<float>& mel = s->mel_buf;
+    const int stride = s->mel_cap;
+    const int base   = s->mel_base;
 
     const int chunk0     = sess.chunk_size_first();
     const int chunk_main = sess.chunk_size();
     const int pre_cache  = sess.pre_encode_cache_size();
 
-    auto window = [&](int lo, int hi) {
+    // Fills the stream's reusable scratch with the feat-major window
+    // [lo, hi) and returns it, so no per-chunk allocation happens.
+    auto window = [&](int lo, int hi) -> const std::vector<float>& {
         const int len = hi - lo;
-        std::vector<float> w((size_t)n_mels * len);
+        s->chunk_buf.resize((size_t)n_mels * len);
         for (int m = 0; m < n_mels; ++m)
-            for (int t = 0; t < len; ++t)
-                w[(size_t)m * len + t] = mel[(size_t)m * T + (lo + t)];
-        return w;
+            std::memcpy(&s->chunk_buf[(size_t)m * len],
+                        &mel[(size_t)m * stride + (lo - base)],
+                        (size_t)len * sizeof(float));
+        return s->chunk_buf;
     };
 
     std::string new_text;
@@ -523,9 +615,9 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag,
         // CacheAwareStreamingAudioBuffer last-chunk behaviour and the validated
         // run_stream_over_pcm / test_streaming_decode schedule.
         if (!flush && reaches_end) break;
-        const int lo = s->first_chunk ? s->mel_buffer_idx
-                                      : std::max(0, s->mel_buffer_idx - pre_cache);
-        std::vector<float> win = window(lo, chunk_hi);
+        const int lo = oldest_needed_mel_frame(s->mel_buffer_idx, pre_cache,
+                                              s->first_chunk);
+        const std::vector<float>& win = window(lo, chunk_hi);
         const int win_frames = chunk_hi - lo;
         const bool is_last = flush && reaches_end;
 
