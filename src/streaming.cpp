@@ -6,13 +6,6 @@
 
 namespace pk {
 
-// U+2581 (▁) SentencePiece meta-space, UTF-8 0xE2 0x96 0x81.
-static bool piece_starts_with_meta(const std::string& p) {
-    return p.size() >= 3 &&
-           (unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x96 &&
-           (unsigned char)p[2] == 0x81;
-}
-
 // Detokenize ids[from, to) into a text fragment WITHOUT detokenize()'s global
 // single-leading-space strip, so the fragment can be APPENDED to an existing
 // transcript. Mirrors detokenize() step 1+2 exactly (piece concat, ▁->space).
@@ -274,17 +267,14 @@ void StreamingSession::regroup_words(bool flush_all) {
         words_finalized_ = words_.size();
     } else {
         // Move all tail words but the last into final_words_ and advance the
-        // cursor to the last `▁`-word-start in the tail (= the open word's start).
+        // cursor to the start of the open (trailing) word. The boundary MUST use
+        // group_words' own word-start rule (open_word_start), not "piece starts
+        // with `▁`": a `▁`-prefixed punctuation piece like `▁'` starts with `▁`
+        // yet does not open a word, so scanning for `▁` alone would land the
+        // cursor past the real word start and drop that word from every future
+        // tail (and thus from drain_words()/--timestamps/--json).
         if (tail_words.size() > 1) {
-            size_t open_rel = 0;
-            for (size_t i = tail.size(); i-- > 0;) {
-                int32_t id = tail[i].id;
-                if (id >= 0 && (size_t)id < pieces.size() &&
-                    piece_starts_with_meta(pieces[(size_t)id])) {
-                    open_rel = i;
-                    break;
-                }
-            }
+            size_t open_rel = open_word_start(tail, pieces);
             for (size_t i = 0; i + 1 < tail_words.size(); ++i)
                 final_words_.push_back(tail_words[i]);
             wt_cursor_ += open_rel;
