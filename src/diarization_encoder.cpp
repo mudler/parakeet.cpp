@@ -4,6 +4,7 @@
 #include "ggml_graph.hpp"
 #include "ggml.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
