@@ -373,11 +373,12 @@ std::vector<TdtBeamHypothesis> tdt_beam_search(
                 const int duration = durations[pair.duration_idx];
                 BeamState child = best;
                 child.hyp.score += pair.score;
-                if (duration == 0 &&
-                    !(child.hyp.score < best.hyp.score)) {
+                // A near-certain label's log-prob can round to no change in
+                // the running score, so only an increase is an error.
+                if (duration == 0 && child.hyp.score > best.hyp.score) {
                     throw std::runtime_error(
                         "tdt_beam_search: zero-duration expansion "
-                        "did not reduce score");
+                        "increased score");
                 }
                 child.hyp.tokens.push_back(TdtBeamToken{
                     (int32_t)pair.token, (int32_t)time_idx, (int32_t)duration});

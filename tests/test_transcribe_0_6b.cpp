@@ -1,7 +1,9 @@
-#include "parakeet.h"
+#include "model.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <memory>
+#include <stdexcept>
 #include <string>
 
 // North-star end-to-end TDT transcription test for the real
@@ -11,7 +13,10 @@
 // code must honour: d_model=1024 / 24 layers / 128 mels, FastConformer linears
 // and conv convolutions configured with bias=False, and a STACKED 2-layer
 // prediction LSTM (pred_rnn_layers=2). This test asserts the C++ TDT path
-// reproduces NeMo's transcript of tests/fixtures/speech.wav word-for-word.
+// reproduces NeMo's transcript of tests/fixtures/speech.wav word-for-word,
+// and that TDT beam search (beam 4) completes on it with the same top
+// hypothesis: this clip produces zero-duration labels whose log-prob rounds to
+// no change in the float32 running score, which beam search used to reject.
 //
 // The model GGUF is a ~2.4GB download not present in CI, so the test skips
 // cleanly (exit 77) unless PARAKEET_TEST_GGUF_06B points to a converted GGUF.
@@ -45,10 +50,16 @@ int main() {
                                               : std::string(kRefV2);
 
     std::string got;
+    std::string got_beam;
     try {
-        got = pk::transcribe(gguf, "tests/fixtures/speech.wav");
+        std::unique_ptr<pk::Model> model = pk::Model::load(gguf);
+        if (!model) throw std::runtime_error(std::string("failed to load ") + gguf);
+        got = model->transcribe_path("tests/fixtures/speech.wav");
+        got_beam = model->transcribe_path_nbest("tests/fixtures/speech.wav",
+                                                /*beam_size=*/4, /*nbest=*/1)
+                       .at(0).text;
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "test_transcribe_0_6b: pk::transcribe threw: %s\n", e.what());
+        std::fprintf(stderr, "test_transcribe_0_6b: transcribe threw: %s\n", e.what());
         return 1;
     }
     std::fprintf(stderr, "test_transcribe_0_6b: got      = %s\n", got.c_str());
@@ -60,6 +71,15 @@ int main() {
             "  got:      %s\n"
             "  expected: %s\n",
             got.c_str(), expected.c_str());
+        return 1;
+    }
+
+    if (got_beam != expected) {
+        std::fprintf(stderr,
+            "test_transcribe_0_6b: beam 4 MISMATCH\n"
+            "  got:      %s\n"
+            "  expected: %s\n",
+            got_beam.c_str(), expected.c_str());
         return 1;
     }
 
