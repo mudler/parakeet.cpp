@@ -2,6 +2,8 @@
 #include "model_loader.hpp"
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
 
 namespace pk {
 
@@ -51,6 +53,7 @@ struct BatchedPredState {
 class PredictionNet {
 public:
     explicit PredictionNet(const ModelLoader& ml);
+    ~PredictionNet();  // defined in the .cpp (StepReplay must be complete)
 
     // ids:    input label ids (length U). Each id indexes embed.weight.
     // add_sos: prepend a zero SOS step (output length becomes U+1).
@@ -100,6 +103,16 @@ private:
     // via ggml_backend_tensor_get (works for both CPU and device-resident
     // weights). [vocab_p1_ * H_], row-major: embed_host_[id*H_ + h].
     mutable std::vector<float> embed_host_;
+
+    // Replayable per-step LSTM graph (kept alive so ggml-cuda captures + replays
+    // the per-token prediction net). Lazily built on the first step() call.
+    struct StepReplay;
+    mutable std::unique_ptr<StepReplay> replay_;
+
+    // Per-batch-size replayable batched LSTM graph for step_batch (the batched
+    // decode loop calls with a FIXED N per batch). Keyed on N, lazily built.
+    struct StepReplayBatch;
+    mutable std::unordered_map<int, std::unique_ptr<StepReplayBatch>> replay_batch_;
 };
 
 } // namespace pk
