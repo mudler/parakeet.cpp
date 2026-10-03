@@ -222,6 +222,9 @@ if(PARAKEET_PY)
   add_test(NAME check_hf_convert COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_hf_convert.py)
   set_tests_properties(check_hf_convert PROPERTIES SKIP_RETURN_CODE 77)
 
+  add_test(NAME check_bundle COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_bundle.py)
+  set_tests_properties(check_bundle PROPERTIES SKIP_RETURN_CODE 77)
+
   # Licence table of scripts/publish_hf.py (no network, no model needed).
   add_test(NAME check_publish_hf_licences COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_publish_hf_licences.py)
 endif()
@@ -239,3 +242,7 @@ pk_add_test(test_transcribe_vad_silero)
 target_compile_definitions(test_silero_vad PRIVATE PK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_tests_properties(test_silero_vad test_capi_vad_silero test_transcribe_vad_silero PROPERTIES LABELS "model")
 set_tests_properties(test_capi_vad_silero test_transcribe_vad_silero PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+pk_add_test(test_bundle)
+pk_add_test(test_bundle_models)
+set_tests_properties(test_bundle_models PROPERTIES LABELS "model" WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

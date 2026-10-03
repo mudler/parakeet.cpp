@@ -11,6 +11,7 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "bundle.hpp"
 #include "ggml_graph.hpp"
 #include "gguf.h"
 
@@ -182,7 +183,29 @@ std::string shape_str(const ggml_tensor* t) {
 
 }  // namespace
 
-std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string* err) {
+std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string* err, const std::string& component) {
+    // A component of a bundle GGUF (docs/bundle.md): every key and tensor name has
+    // the "<component>." prefix, and only those tensors are read.
+    std::string pfx;
+    if (!component.empty()) {
+        BundleInfo info;
+        std::string berr;
+        if (!read_bundle_info(path, info, &berr)) {
+            set_err(err, berr);
+            return nullptr;
+        }
+        const BundleComponent* bc = info.find(component);
+        if (!bc) {
+            set_err(err, path + ": no component \"" + component + "\"; components: " + bundle_component_names(info));
+            return nullptr;
+        }
+        if (bc->kind != kBundleKindVad) {
+            set_err(err, path + ": component \"" + component + "\" has kind \"" + bc->kind + "\", not \"" +
+                             kBundleKindVad + "\"");
+            return nullptr;
+        }
+        pfx = component + ".";
+    }
     ggml_context* meta = nullptr;
     gguf_init_params gp{/*no_alloc*/ true, /*ctx*/ &meta};
     gguf_context* g = gguf_init_from_file(path.c_str(), gp);
@@ -205,13 +228,13 @@ std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string*
 
     // Typed metadata reads: a key of the wrong type is an error, not an abort.
     auto u32 = [&](const std::string& k, uint32_t* out) {
-        const int64_t id = gguf_find_key(g, k.c_str());
+        const int64_t id = gguf_find_key(g, (pfx + k).c_str());
         if (id < 0 || gguf_get_kv_type(g, id) != GGUF_TYPE_UINT32) return false;
         *out = gguf_get_val_u32(g, id);
         return true;
     };
     auto i32_array = [&](const std::string& k, std::vector<int32_t>* out) {
-        const int64_t id = gguf_find_key(g, k.c_str());
+        const int64_t id = gguf_find_key(g, (pfx + k).c_str());
         if (id < 0 || gguf_get_kv_type(g, id) != GGUF_TYPE_ARRAY || gguf_get_arr_type(g, id) != GGUF_TYPE_INT32)
             return false;
         const int32_t* d = (const int32_t*)gguf_get_arr_data(g, id);
@@ -219,7 +242,11 @@ std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string*
         return true;
     };
 
-    const int64_t arch = gguf_find_key(g, "general.architecture");
+    if (pfx.empty() && gguf_find_key(g, "general.architecture") >= 0 &&
+        gguf_get_kv_type(g, gguf_find_key(g, "general.architecture")) == GGUF_TYPE_STRING &&
+        std::string(gguf_get_val_str(g, gguf_find_key(g, "general.architecture"))) == kBundleArch)
+        return fail("this is a bundle GGUF; load its Silero component by name");
+    const int64_t arch = gguf_find_key(g, (pfx + "general.architecture").c_str());
     if (arch < 0 || gguf_get_kv_type(g, arch) != GGUF_TYPE_STRING)
         return fail("no general.architecture; this is not a Silero VAD GGUF");
     if (std::string(gguf_get_val_str(g, arch)) != "silero_vad")
@@ -246,8 +273,10 @@ std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string*
     if (!m->ctx_) return fail("ggml_init failed");
     std::vector<std::pair<ggml_tensor*, int64_t>> todo;  // dst, gguf tensor id
     for (int64_t i = 0; i < nt; ++i) {
-        const char* name = gguf_get_tensor_name(g, i);
-        ggml_tensor* src = ggml_get_tensor(meta, name);
+        const char* full = gguf_get_tensor_name(g, i);
+        if (std::strncmp(full, pfx.c_str(), pfx.size()) != 0) continue;  // another component
+        const char* name = full + pfx.size();
+        ggml_tensor* src = ggml_get_tensor(meta, full);
         if (!src) return fail(std::string("tensor ") + name + " has no metadata");
         if (src->type != GGML_TYPE_F32 && src->type != GGML_TYPE_F16)
             return fail(std::string("tensor ") + name + " has type " + ggml_type_name(src->type) +
@@ -318,7 +347,7 @@ std::unique_ptr<SileroVad> SileroVad::load(const std::string& path, std::string*
     std::vector<uint8_t> raw;
     std::vector<float> wide;
     for (auto& pr : todo) {
-        ggml_tensor* src = ggml_get_tensor(meta, pr.first->name);
+        ggml_tensor* src = ggml_get_tensor(meta, (pfx + pr.first->name).c_str());
         const size_t n = (size_t)ggml_nelements(src);
         raw.resize(ggml_nbytes(src));
         f.seekg((std::streamoff)(base + gguf_get_tensor_offset(g, pr.second)));

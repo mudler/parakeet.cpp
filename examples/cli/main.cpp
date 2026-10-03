@@ -27,6 +27,7 @@
 #include "vad_head.hpp"
 #include "vad_json.hpp"
 #include "silero_vad.hpp"
+#include "bundle.hpp"
 #include "speaker_encoder.hpp"
 #include "speaker_registry.hpp"
 #include <atomic>
@@ -53,13 +54,118 @@
 #include <io.h>
 #endif
 
-static int cmd_info(const char* path) {
+// The ASR component that --model/--component name, "" for a plain single-model
+// file. Set once by the commands that take --component; load_asr() uses it.
+static std::string g_asr_component;
+
+// Resolves `component` (may be empty) against `model`. On a bundle with no
+// component named, picks the default ASR component. Returns false with a message
+// when the file is a plain GGUF but a component was named, or when there is no
+// unique default.
+static bool resolve_asr_component(const std::string& model, const std::string& component, std::string& out) {
+    out.clear();
+    if (!pk::gguf_is_bundle(model)) {
+        if (!component.empty()) {
+            std::fprintf(stderr, "parakeet-cli: %s is not a bundle GGUF, so --component does not apply\n", model.c_str());
+            return false;
+        }
+        return true;
+    }
+    pk::BundleInfo info;
+    std::string err;
+    if (!pk::read_bundle_info(model, info, &err)) { std::fprintf(stderr, "parakeet-cli: %s\n", err.c_str()); return false; }
+    if (!component.empty()) {
+        const pk::BundleComponent* c = info.find(component);
+        if (!c) {
+            std::fprintf(stderr, "parakeet-cli: bundle has no component '%s'; components: %s\n", component.c_str(),
+                         pk::bundle_component_names(info).c_str());
+            return false;
+        }
+        if (c->kind != pk::kBundleKindAsr) {
+            std::fprintf(stderr, "parakeet-cli: component '%s' has kind %s, not an ASR model\n", component.c_str(), c->kind.c_str());
+            return false;
+        }
+        out = component;
+        return true;
+    }
+    if (!pk::select_default_component(info, out, &err)) { std::fprintf(stderr, "parakeet-cli: %s\n", err.c_str()); return false; }
+    return true;
+}
+
+static std::unique_ptr<pk::Model> load_asr(const std::string& model) {
+    return pk::Model::load(model, g_asr_component);
+}
+
+static parakeet_ctx* load_asr_ctx(const std::string& model) {
+    parakeet_ctx* ctx = parakeet_capi_load_component(model.c_str(), g_asr_component.c_str());
+    if (!ctx) std::fprintf(stderr, "parakeet-cli: %s\n", parakeet_capi_load_error());
+    return ctx;
+}
+
+static int cmd_info_bundle(const char* path, const pk::BundleInfo& info) {
+    std::printf("parakeet.cpp %s\n", parakeet_version());
+    std::printf("bundle: %s\n", path);
+    std::printf("  name            : %s\n", info.name.c_str());
+    std::printf("  format version  : %u\n", info.version);
+    for (const pk::BundleComponent& c : info.components) {
+        std::printf("  component %s\n", c.name.c_str());
+        std::printf("    kind          : %s\n", c.kind.c_str());
+        std::printf("    licence       : %s (%s)\n", c.license.c_str(), c.license_url.c_str());
+        std::printf("    source        : %s\n", c.source.c_str());
+        std::printf("    attribution   : %s\n", c.attribution.c_str());
+        std::printf("    changes       : %s\n", c.changes.c_str());
+        std::printf("    tensors       : %llu (%.1f MB)\n", (unsigned long long)c.n_tensors, (double)c.n_bytes / 1e6);
+        if (!c.content_sha256.empty()) std::printf("    content sha256: %s\n", c.content_sha256.c_str());
+    }
+    std::string def, err;
+    if (pk::select_default_component(info, def, &err)) std::printf("  default for load: %s\n", def.c_str());
+    else std::printf("  default for load: none (%s)\n", err.c_str());
+    std::printf("  (use --component NAME for the details of one component)\n");
+    return 0;
+}
+
+static int cmd_info(int argc, char** argv) {
+    const char* path = argv[0];
+    std::string component;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--component") == 0 && i + 1 < argc) component = argv[++i];
+        else { std::fprintf(stderr, "usage: parakeet-cli info <model.gguf> [--component NAME]\n"); return 2; }
+    }
+    if (pk::gguf_is_bundle(path)) {
+        pk::BundleInfo info;
+        std::string err;
+        if (!pk::read_bundle_info(path, info, &err)) { std::fprintf(stderr, "parakeet-cli: %s\n", err.c_str()); return 1; }
+        if (component.empty()) return cmd_info_bundle(path, info);
+        const pk::BundleComponent* bc = info.find(component);
+        if (!bc) {
+            std::fprintf(stderr, "parakeet-cli: bundle has no component '%s'; components: %s\n", component.c_str(),
+                         pk::bundle_component_names(info).c_str());
+            return 1;
+        }
+        std::printf("component: %s (kind %s, licence %s)\n", bc->name.c_str(), bc->kind.c_str(), bc->license.c_str());
+        if (bc->kind == pk::kBundleKindVad) {
+            std::string err2;
+            std::unique_ptr<pk::SileroVad> sv = pk::SileroVad::load(path, &err2, component);
+            if (!sv) { std::fprintf(stderr, "parakeet-cli: %s\n", err2.c_str()); return 1; }
+            std::printf("  silero VAD, sample rates:");
+            for (int r : sv->sample_rates()) std::printf(" %d", r);
+            std::printf("\n");
+            return 0;
+        }
+    } else if (!component.empty()) {
+        std::fprintf(stderr, "parakeet-cli: %s is not a bundle GGUF, so --component does not apply\n", path);
+        return 1;
+    }
     pk::ModelLoader ml;
-    if (!ml.load(path)) { std::fprintf(stderr, "failed to load %s\n", path); return 1; }
+    if (!(component.empty() ? ml.load(path) : ml.load_component(path, component))) {
+        std::fprintf(stderr, "failed to load %s\n", path);
+        return 1;
+    }
     const pk::ParakeetConfig& c = ml.config();
     std::printf("parakeet.cpp %s\n", parakeet_version());
     std::printf("model: %s\n", path);
     std::printf("  arch            : %s\n", c.arch.c_str());
+    if (c.vad.present) std::printf("  vad head        : yes (%.3f s frames)\n", (double)c.vad.frame_sec);
     std::printf("  d_model/layers/heads: %u / %u / %u\n", c.d_model, c.n_layers, c.n_heads);
     std::printf("  conv_kernel/norm: %u / %s\n", c.conv_kernel, c.conv_norm_type.c_str());
     std::printf("  xscaling        : %s\n", c.xscaling ? "true" : "false");
@@ -222,23 +328,43 @@ struct VadOverrides {
 
 static int cmd_transcribe_vad(const std::string& model, const std::string& input, pk::Decoder dec,
                               const std::string& lang, bool timestamps, bool json,
-                              const VadOverrides& ov, const std::string& vad_model) {
+                              const VadOverrides& ov, const std::string& vad_model,
+                              const std::string& vad_component) {
     pk::Audio audio;
     if (!load_audio_arg_16k_mono(input, audio)) {
         std::fprintf(stderr, "parakeet-cli: failed to load audio %s\n", input.c_str());
         return 1;
     }
     try {
-        std::unique_ptr<pk::Model> m = pk::Model::load(model);
+        std::unique_ptr<pk::Model> m = load_asr(model);
         if (!m) { std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str()); return 1; }
-        pk::SegmenterOpts opts = pk::default_segmenter_opts(vad_model.empty() ? pk::VadKind::kHead : pk::VadKind::kSilero);
+        // VAD source: --vad-model (a Silero GGUF, or a bundle with --vad-component),
+        // else the Silero component of the --model bundle, else the ASR head.
+        std::string silero_path = vad_model, silero_comp;
+        if (vad_model.empty() && pk::gguf_is_bundle(model)) {
+            pk::BundleInfo info;
+            std::string berr;
+            if (!pk::read_bundle_info(model, info, &berr)) { std::fprintf(stderr, "parakeet-cli: %s\n", berr.c_str()); return 1; }
+            if (!vad_component.empty()) {
+                const pk::BundleComponent* c = info.find(vad_component);
+                if (!c) { std::fprintf(stderr, "parakeet-cli: bundle has no component '%s'; components: %s\n", vad_component.c_str(), pk::bundle_component_names(info).c_str()); return 1; }
+                if (c->kind == pk::kBundleKindVad) { silero_path = model; silero_comp = vad_component; }
+                else if (vad_component != g_asr_component) { std::fprintf(stderr, "parakeet-cli: --vad-component %s is not a VAD component\n", vad_component.c_str()); return 1; }
+            } else {
+                for (const pk::BundleComponent& c : info.components)
+                    if (c.kind == pk::kBundleKindVad) { silero_path = model; silero_comp = c.name; break; }
+            }
+        } else if (!vad_model.empty() && !vad_component.empty()) {
+            silero_comp = vad_component;
+        }
+        pk::SegmenterOpts opts = pk::default_segmenter_opts(silero_path.empty() ? pk::VadKind::kHead : pk::VadKind::kSilero);
         ov.apply(opts);
         std::unique_ptr<pk::SileroVad> silero;
         pk::Model::VadProbabilityFn fn;
-        if (!vad_model.empty()) {
+        if (!silero_path.empty()) {
             std::string err;
-            silero = pk::SileroVad::load(vad_model, &err);
-            if (!silero) { std::fprintf(stderr, "parakeet-cli: failed to load VAD model %s: %s\n", vad_model.c_str(), err.c_str()); return 1; }
+            silero = pk::SileroVad::load(silero_path, &err, silero_comp);
+            if (!silero) { std::fprintf(stderr, "parakeet-cli: failed to load VAD model %s: %s\n", silero_path.c_str(), err.c_str()); return 1; }
             const pk::SileroVad* sv = silero.get();
             fn = [sv](const std::vector<float>& pcm16k) {
                 std::vector<float> p = sv->probabilities(pcm16k.data(), pcm16k.size(), 16000);
@@ -277,7 +403,7 @@ static int cmd_transcribe(int argc, char** argv) {
     bool timestamps = false;
     bool json = false;
     bool vad = false;
-    std::string vad_model;
+    std::string vad_model, vad_component, component;
     VadOverrides vad_ov;
     double d = 0.0;
     auto parse_pos = [](const char* str, double& out) {
@@ -314,6 +440,11 @@ static int cmd_transcribe(int argc, char** argv) {
             score_norm = false;
         } else if (std::strcmp(argv[i], "--vad") == 0) {
             vad = true;
+        } else if (std::strcmp(argv[i], "--component") == 0 && i + 1 < argc) {
+            component = argv[++i];
+        } else if (std::strcmp(argv[i], "--vad-component") == 0 && i + 1 < argc) {
+            vad_component = argv[++i];
+            vad = true;
         } else if (std::strcmp(argv[i], "--vad-model") == 0 && i + 1 < argc) {
             vad_model = argv[++i];
             vad = true;
@@ -336,11 +467,14 @@ static int cmd_transcribe(int argc, char** argv) {
             "usage: parakeet-cli transcribe --model <m.gguf> --input <wav|-> "
             "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
             "[--threads N] [--json] "
-            "[--vad [--vad-model <silero.gguf>] [--vad-threshold F=0.5] [--vad-min-pause SEC] "
+            "[--component NAME] "
+            "[--vad [--vad-model <silero.gguf>] [--vad-component NAME] [--vad-threshold F=0.5] [--vad-min-pause SEC] "
             "[--vad-min-speech SEC] [--vad-max-seg SEC=30]] "
             "[--beam-size N [--nbest N] [--no-score-norm]]\n");
         return 2;
     }
+    // A bundle GGUF: pick the ASR component (the only "asr" one unless --component).
+    if (!resolve_asr_component(model, component, g_asr_component)) return 2;
     // Apply the thread override (offline + streaming graph compute). When unset
     // the persistent-backend default (kDefaultThreads) is used.
     if (threads > 0) pk::set_num_threads(threads);
@@ -389,7 +523,7 @@ static int cmd_transcribe(int argc, char** argv) {
             std::fprintf(stderr, "parakeet-cli: --vad works with greedy decoding only\n");
             return 2;
         }
-        return cmd_transcribe_vad(model, input, dec, lang, timestamps, json, vad_ov, vad_model);
+        return cmd_transcribe_vad(model, input, dec, lang, timestamps, json, vad_ov, vad_model, vad_component);
     }
     if (nbest != 0 && beam_size == 0) {
         std::fprintf(stderr,
@@ -431,7 +565,7 @@ static int cmd_transcribe(int argc, char** argv) {
                 return 1;
             }
             try {
-                std::unique_ptr<pk::Model> m = pk::Model::load(model);
+                std::unique_ptr<pk::Model> m = load_asr(model);
                 if (!m) {
                     std::fprintf(stderr,
                         "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -452,7 +586,7 @@ static int cmd_transcribe(int argc, char** argv) {
             return 0;
         }
 
-        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        parakeet_ctx* ctx = load_asr_ctx(model);
         if (!ctx) {
             std::fprintf(stderr,
                 "parakeet-cli: failed to load model %s\n", model.c_str());
@@ -483,7 +617,7 @@ static int cmd_transcribe(int argc, char** argv) {
                 return 1;
             }
             try {
-                std::unique_ptr<pk::Model> m = pk::Model::load(model);
+                std::unique_ptr<pk::Model> m = load_asr(model);
                 if (!m) {
                     std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
                     return 1;
@@ -499,7 +633,7 @@ static int cmd_transcribe(int argc, char** argv) {
             return 0;
         }
 
-        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        parakeet_ctx* ctx = load_asr_ctx(model);
         if (!ctx) {
             std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
             return 1;
@@ -525,7 +659,7 @@ static int cmd_transcribe(int argc, char** argv) {
             return 1;
         }
         try {
-            std::unique_ptr<pk::Model> m = pk::Model::load(model);
+            std::unique_ptr<pk::Model> m = load_asr(model);
             if (!m) {
                 std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
                 return 1;
@@ -550,7 +684,7 @@ static int cmd_transcribe(int argc, char** argv) {
     // surfaces as a clean error). With no --lang keep the existing free-function
     // path so behavior for every other model is byte-for-byte unchanged.
     if (!lang.empty() && !is_stdin_input(input)) {
-        parakeet_ctx* ctx = parakeet_capi_load(model.c_str());
+        parakeet_ctx* ctx = load_asr_ctx(model);
         if (!ctx) {
             std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
             return 1;
@@ -576,14 +710,17 @@ static int cmd_transcribe(int argc, char** argv) {
                 std::fprintf(stderr, "parakeet-cli: failed to load audio stdin\n");
                 return 1;
             }
-            std::unique_ptr<pk::Model> m = pk::Model::load(model);
+            std::unique_ptr<pk::Model> m = load_asr(model);
             if (!m) {
                 std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
                 return 1;
             }
             text = m->transcribe_pcm(audio.samples, audio.sample_rate, dec, lang);
         } else {
-            text = pk::transcribe(model, input, dec);
+            // Same as pk::transcribe(), with the bundle component applied.
+            std::unique_ptr<pk::Model> m = load_asr(model);
+            if (!m) throw std::runtime_error("parakeet: failed to load model: " + model);
+            text = m->transcribe_path(input, dec);
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "transcribe failed: %s\n", e.what());
@@ -1904,7 +2041,7 @@ static int cmd_vad_probe(int argc, char** argv) {
 // with a VAD head (Ultra, Redux) or a Silero VAD GGUF. Unset options keep the
 // defaults of that model kind.
 static int cmd_vad(int argc, char** argv) {
-    std::string model, input;
+    std::string model, input, component;
     VadOverrides ov;
     std::optional<pk::VadRequest::Mode> mode;
     bool want_probs = false;
@@ -1922,6 +2059,7 @@ static int cmd_vad(int argc, char** argv) {
         double d = 0.0;
         if (std::strcmp(argv[i], "--model") == 0 && i + 1 < argc) model = argv[++i];
         else if (std::strcmp(argv[i], "--input") == 0 && i + 1 < argc) input = argv[++i];
+        else if (std::strcmp(argv[i], "--component") == 0 && i + 1 < argc) component = argv[++i];
         else if (std::strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) {
             if (!num(argv[++i], d, false) || d > 1.0) return bad("--threshold must be in (0,1]");
             ov.threshold = d;
@@ -1948,8 +2086,8 @@ static int cmd_vad(int argc, char** argv) {
     }
     if (model.empty() || input.empty()) {
         std::fprintf(stderr,
-            "usage: parakeet-cli vad --model <asr-with-vad-head.gguf|silero.gguf> --input <wav|-> "
-            "[--threshold F=0.5] [--min-pause SEC] [--min-speech SEC] [--speech-pad SEC] "
+            "usage: parakeet-cli vad --model <asr-with-vad-head.gguf|silero.gguf|bundle.gguf> --input <wav|-> "
+            "[--component NAME] [--threshold F=0.5] [--min-pause SEC] [--min-speech SEC] [--speech-pad SEC] "
             "[--max-segment SEC=30] [--mode speech|segments] [--probabilities] [--threads N]\n");
         return 2;
     }
@@ -1960,7 +2098,38 @@ static int cmd_vad(int argc, char** argv) {
         return 1;
     }
     try {
-        const bool is_silero = pk::gguf_is_silero(model);
+        // A bundle: --component names the VAD source (a Silero component, or the
+        // ASR component whose head is used). Without it, the Silero component
+        // if there is one, else the default ASR component.
+        std::string comp;
+        bool is_silero = pk::gguf_is_silero(model);
+        if (pk::gguf_is_bundle(model)) {
+            pk::BundleInfo info;
+            std::string berr;
+            if (!pk::read_bundle_info(model, info, &berr)) { std::fprintf(stderr, "parakeet-cli: %s\n", berr.c_str()); return 1; }
+            const pk::BundleComponent* pick = component.empty() ? nullptr : info.find(component);
+            if (!component.empty() && !pick) {
+                std::fprintf(stderr, "parakeet-cli: bundle has no component '%s'; components: %s\n", component.c_str(), pk::bundle_component_names(info).c_str());
+                return 1;
+            }
+            if (component.empty())
+                for (const pk::BundleComponent& c : info.components)
+                    if (c.kind == pk::kBundleKindVad) { pick = &c; break; }
+            if (!pick) {
+                if (!pk::select_default_component(info, comp, &berr)) { std::fprintf(stderr, "parakeet-cli: %s\n", berr.c_str()); return 1; }
+            } else {
+                comp = pick->name;
+            }
+            const pk::BundleComponent* chosen = info.find(comp);
+            is_silero = chosen && chosen->kind == pk::kBundleKindVad;
+            if (chosen && chosen->kind != pk::kBundleKindVad && chosen->kind != pk::kBundleKindAsr) {
+                std::fprintf(stderr, "parakeet-cli: component '%s' (kind %s) is not a VAD source\n", comp.c_str(), chosen->kind.c_str());
+                return 1;
+            }
+        } else if (!component.empty()) {
+            std::fprintf(stderr, "parakeet-cli: %s is not a bundle GGUF, so --component does not apply\n", model.c_str());
+            return 2;
+        }
         pk::VadRequest req;
         req.kind = is_silero ? pk::VadKind::kSilero : pk::VadKind::kHead;
         req.opts = pk::default_segmenter_opts(req.kind);
@@ -1969,12 +2138,12 @@ static int cmd_vad(int argc, char** argv) {
         req.probabilities = want_probs;
         if (is_silero) {
             std::string err;
-            std::unique_ptr<pk::SileroVad> sv = pk::SileroVad::load(model, &err);
+            std::unique_ptr<pk::SileroVad> sv = pk::SileroVad::load(model, &err, comp);
             if (!sv) { std::fprintf(stderr, "parakeet-cli: failed to load model %s: %s\n", model.c_str(), err.c_str()); return 1; }
             std::printf("%s\n", pk::silero_vad_to_json(*sv, audio.samples, 16000, req).c_str());
             return 0;
         }
-        std::unique_ptr<pk::Model> m = pk::Model::load(model);
+        std::unique_ptr<pk::Model> m = pk::Model::load(model, comp);
         if (!m) { std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str()); return 1; }
         std::printf("%s\n", pk::vad_to_json(*m, audio.samples, req).c_str());
     } catch (const std::exception& e) {
@@ -1991,7 +2160,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc >= 3 && std::strcmp(argv[1], "info") == 0)
-        return run_and_shutdown([](int, char** a) { return cmd_info(a[0]); }, 1, argv + 2);
+        return run_and_shutdown(cmd_info, argc - 2, argv + 2);
     if (argc >= 2 && std::strcmp(argv[1], "transcribe") == 0)
         return run_and_shutdown(cmd_transcribe, argc - 2, argv + 2);
     if (argc >= 2 && std::strcmp(argv[1], "quantize") == 0)
@@ -2016,11 +2185,12 @@ int main(int argc, char** argv) {
         "[--threshold F=0.5] [--min-pause SEC] [--min-speech SEC] [--speech-pad SEC] "
         "[--max-segment SEC=30] [--mode speech|segments] [--probabilities] [--threads N]\n"
         "  parakeet-cli vad-probe --model <m.gguf> --input <wav|-> [--variant N]\n"
-        "  parakeet-cli info <model.gguf>\n"
+        "  parakeet-cli info <model.gguf> [--component NAME]\n"
         "  parakeet-cli transcribe --model <model.gguf> --input <wav|-> "
         "[--decoder ctc|tdt] [--lang <locale>] [--stream] [--timestamps] "
         "[--threads N] [--json] "
-        "[--vad [--vad-model <silero.gguf>] [--vad-threshold F=0.5] [--vad-min-pause SEC] "
+        "[--component NAME] "
+            "[--vad [--vad-model <silero.gguf>] [--vad-component NAME] [--vad-threshold F=0.5] [--vad-min-pause SEC] "
             "[--vad-min-speech SEC] [--vad-max-seg SEC=30]] "
         "[--beam-size N [--nbest N] [--no-score-norm]]\n"
         "  parakeet-cli quantize <in.gguf> <out.gguf> "

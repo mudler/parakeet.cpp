@@ -44,12 +44,12 @@ bool arch_prefers_tdt(const std::string& arch) {
 }
 } // namespace
 
-std::unique_ptr<Model> Model::load(const std::string& gguf_path) {
+std::unique_ptr<Model> Model::load(const std::string& gguf_path, const std::string& component) {
     // unique_ptr<Model> via private ctor: construct then load. We avoid
     // std::make_unique (private ctor) and never throw out of here.
     std::unique_ptr<Model> m(new (std::nothrow) Model());
     if (!m) return nullptr;
-    if (!m->loader_.load(gguf_path)) {
+    if (!(component.empty() ? m->loader_.load(gguf_path) : m->loader_.load_component(gguf_path, component))) {
         return nullptr;
     }
     // Model is the ASR entry point — reject diarization models so the C-API

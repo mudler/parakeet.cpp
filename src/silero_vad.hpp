@@ -74,7 +74,11 @@ private:
 class SileroVad {
 public:
     // Returns nullptr on failure and writes a one-line reason to *err (when not null).
-    static std::unique_ptr<SileroVad> load(const std::string& gguf_path, std::string* err = nullptr);
+    // With a non-empty `component`, `gguf_path` is a bundle GGUF (docs/bundle.md):
+    // the Silero weights are read from that component only, and no other
+    // component's tensor data is read.
+    static std::unique_ptr<SileroVad> load(const std::string& gguf_path, std::string* err = nullptr,
+                                           const std::string& component = "");
     ~SileroVad();
     SileroVad(const SileroVad&) = delete;
     SileroVad& operator=(const SileroVad&) = delete;

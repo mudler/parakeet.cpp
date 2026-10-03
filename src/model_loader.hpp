@@ -13,6 +13,7 @@ typedef struct ggml_backend_buffer* ggml_backend_buffer_t;
 struct ggml_backend;
 typedef struct ggml_backend* ggml_backend_t;
 namespace pk {
+struct KvView;
 // Cache-aware streaming params (Phase 5), populated only for streaming models
 // (att_context_style != "regular"). Mirrors NeMo CacheAwareStreamingConfig.
 // List fields are stored as int32 arrays in the GGUF (e.g. chunk_size=[9,16]).
@@ -129,6 +130,10 @@ public:
     ModelLoader() = default;
     ~ModelLoader();
     bool load(const std::string& path);
+    // Loads one component of a bundle GGUF (docs/bundle.md). Reads only that
+    // component's tensors; the tensors and keys are seen under their original
+    // names. load() refuses a bundle with a message that points here.
+    bool load_component(const std::string& path, const std::string& component);
     const ParakeetConfig& config() const { return cfg_; }
     const std::vector<std::string>& tokenizer_pieces() const { return cfg_.tokenizer_pieces; }
     ggml_tensor* tensor(const std::string& name) const; // nullptr if absent
@@ -158,6 +163,7 @@ public:
     // tensors they were built from.
     std::shared_ptr<void>& ternary_store() const { return ternary_store_; }
 private:
+    bool parse_config(const KvView& kv);
     mutable std::shared_ptr<void> ternary_store_;
     ParakeetConfig cfg_;
     gguf_context* gguf_ = nullptr;

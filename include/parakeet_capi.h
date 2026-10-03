@@ -71,11 +71,41 @@ typedef struct parakeet_ctx parakeet_ctx;
 //      parakeet_capi_transcribe_path_json_vad*) and Silero VAD contexts are
 //      additive and keep ABI v10: a caller that needs them checks for the symbols
 //      (dlsym) or for PARAKEET_MODEL_KIND_VAD.
+// Bundle GGUF (parakeet_capi_load_component, parakeet_capi_bundle_components_json,
+//      parakeet_capi_load_error; docs/bundle.md) is additive and keeps ABI v10.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
 // The returned context must be released with parakeet_capi_free.
+//
+// A bundle GGUF (several models in one file, general.architecture
+// "parakeet-bundle"; format in docs/bundle.md) loads its ASR component: the only
+// component of kind "asr", or, if it has none, its only loadable component. A
+// bundle with several candidates is refused with a message that lists them (see
+// parakeet_capi_load_error); open one with parakeet_capi_load_component. Only
+// the chosen component's tensors are read from disk.
 parakeet_ctx* parakeet_capi_load(const char* gguf_path);
+
+// Additive (no ABI bump): open one named component of a bundle GGUF. The
+// context is of the kind the component declares: "asr" gives an ASR context,
+// "vad" a Silero VAD context (parakeet_capi_model_kind PARAKEET_MODEL_KIND_VAD).
+// Returns NULL, with a reason in parakeet_capi_load_error, when `gguf_path` is
+// not a bundle, has no such component, or has a component kind this build
+// cannot load. A NULL or empty `component` behaves like parakeet_capi_load.
+parakeet_ctx* parakeet_capi_load_component(const char* gguf_path, const char* component);
+
+// Additive: the components of a bundle GGUF as a malloc'd JSON array (free with
+// parakeet_capi_free_string), read from the header only. One object per
+// component: {"name","kind","license","license_url","source","attribution",
+// "changes","source_sha256","content_sha256","tensors","bytes"}. NULL (reason
+// in parakeet_capi_load_error) when the file is not a bundle or its header is
+// malformed or has a newer format version than this build reads.
+char* parakeet_capi_bundle_components_json(const char* gguf_path);
+
+// Additive: the reason the last parakeet_capi_load, parakeet_capi_load_component
+// or parakeet_capi_bundle_components_json call on this thread failed. Valid
+// until the next of those calls on the same thread; never NULL.
+const char* parakeet_capi_load_error(void);
 
 // Free a context obtained from parakeet_capi_load. Safe on NULL.
 void parakeet_capi_free(parakeet_ctx* ctx);
