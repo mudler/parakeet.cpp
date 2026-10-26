@@ -1,4 +1,4 @@
-import sys,pickle,time,numpy as np
+import sys,json,time,numpy as np
 from multiprocessing import Pool
 from fl import *
 from rules import *
@@ -55,4 +55,9 @@ if __name__=="__main__":
     with Pool(5) as pool: lo=pool.map(lr_split,lj,chunksize=1)
     res["lr"]={k:(o,c) for k,o,c in lo}
     res["meta"]=dict(names=[d["name"] for d in D],cond=[d["cond"] for d in D],fold=folds.tolist(),snr_true=[d["snr_true"] for d in D],noise_only=[d["noise_only"] for d in D],snr_est=[d["snr_est"] for d in D],dur=[d["dur"] for d in D])
-    pickle.dump(res,open("results.pkl","wb")); print("done",time.time()-t0)
+    res_json = {
+        "cfg": [{"rule": k[0], "p": list(k[1]), "h": k[2], "ms": k[3], "arr": v.tolist()} for k, v in res["cfg"].items()],
+        "lr": [{"h": k[0], "kind": k[1], "split": k[2], "out": v[0].tolist(), "coef": v[1]} for k, v in res["lr"].items()],
+        "meta": res["meta"]
+    }
+    json.dump(res_json, open("results.json", "w")); print("done", time.time() - t0)
