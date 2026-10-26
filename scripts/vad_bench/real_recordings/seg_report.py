@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-import pickle, numpy as np, sys, os
+import json, numpy as np, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vr
-R = pickle.load(open(f"{vr.ROOT}/results/seg.pkl", "rb")); M = R["meta"]; res = R["res"]
+R = json.load(open(f"{vr.ROOT}/results/seg.json", "r")); M = R["meta"]
+res = {
+    rid: {
+        (k.split("|")[0], k.split("|")[1], float(k.split("|")[2])): np.array(v)
+        for k, v in rdict.items()
+    }
+    for rid, rdict in R["res"].items()
+}
 DOMS = ["vox", "ami", "ava", "music", "noise", "esc"]
 rng = np.random.default_rng(11)
 IDS = {d: [m["id"] for m in M if m["domain"] == d] for d in DOMS}; HRS = {d: sum(m["dur"] for m in M if m["domain"] == d) / 3600 for d in DOMS}
