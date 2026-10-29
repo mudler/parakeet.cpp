@@ -132,6 +132,11 @@ ggml_tensor* graph_input_tensor(ggml_context* ctx, int type, int n_dims,
 // Must be called from inside a build lambda passed to Backend::compute.
 bool active_backend_is_cpu();
 
+// True when the Backend driving the current compute runs `op` itself, so the
+// graph keeps the gallocr fast path instead of the scheduler's CPU fallback.
+// Must be called from inside a build lambda passed to Backend::compute.
+bool active_backend_supports(const ggml_tensor* op);
+
 // Capture an intermediate graph tensor for readback after Backend::compute.
 // `*dst` is resized to the tensor's element count and filled with its f32
 // contents once the graph has run. Must be called from inside a build lambda;

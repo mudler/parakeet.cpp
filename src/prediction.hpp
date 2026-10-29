@@ -1,8 +1,12 @@
 #pragma once
+#include <atomic>
 #include <mutex>
 #include "model_loader.hpp"
 #include <vector>
 #include <cstdint>
+
+struct ggml_context;
+struct ggml_tensor;
 
 namespace pk {
 
@@ -75,6 +79,13 @@ public:
               std::vector<float>& g,
               PredState& out_state) const;
 
+    // The graph of step() inside a caller's graph, so a caller can chain the joint onto it. Registers
+    // x0 and the state as inputs and out_state as captures; returns the top layer's h' [hidden]. x0 is
+    // scratch for the layer-0 input and must outlive the compute.
+    ggml_tensor* build_step(ggml_context* ctx, int32_t token_id, bool is_sos,
+                            const PredState& in, std::vector<float>& x0,
+                            PredState& out_state) const;
+
     // Advance the LSTM one token for N items at once.
     // token_ids[n]: embedding index for item n (ignored where is_sos[n]).
     // is_sos[n]:    use the zero SOS input for item n (1=true).
@@ -90,6 +101,10 @@ public:
     int hidden_size() const { return H_; }
 
     int num_layers() const { return n_layers_; }
+
+    // True once the embedding table has been copied to the host. A step fetches it even for SOS, so a
+    // warm-up that emits no token still pays the one-time read. For tests.
+    bool embed_table_fetched() const { return embed_fetched_.load(std::memory_order_acquire); }
 
 private:
     const ModelLoader& ml_;
@@ -107,6 +122,7 @@ private:
     // PredictionNet is safe to use from several threads.
     mutable std::once_flag embed_once_;
     mutable std::vector<float> embed_host_;
+    mutable std::atomic<bool> embed_fetched_{false};
 };
 
 } // namespace pk

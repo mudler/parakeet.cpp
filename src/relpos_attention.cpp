@@ -48,6 +48,55 @@ static ggml_tensor* attn_linear(ggml_context* ctx, const ModelLoader& ml,
     return y;
 }
 
+ggml_tensor* rel_shift(ggml_context* ctx, ggml_tensor* bd) {
+    // NeMo's rel_shift (pad one column, reshape, drop a row, slice) leaves bd[T-1-q+j, q] at (key j,
+    // query q). A view reads exactly that without copying [P, T, H] three times: start at position T-1
+    // and step one element back for each query row.
+    const int64_t T = bd->ne[1];
+    return ggml_view_3d(ctx, bd, T, T, bd->ne[2], bd->nb[1] - bd->nb[0], bd->nb[2],
+                        (size_t)(T - 1) * bd->nb[0]); // [T, T, H]
+}
+
+// Additive mask [T_k, T_q]: 0 where query qi may attend to key kj, -inf
+// otherwise. (1) pad mask: key kj valid iff kj < valid_len. (2) chunked-
+// limited window for streaming models. See header / NeMo _create_masks.
+// PADDED query rows (qi >= valid_len) are left fully unmasked: with a
+// limited window a deeply padded row can have its ENTIRE row masked, and
+// softmax over all -inf is NaN — which the post-softmax query mask does NOT
+// clear (NaN*0 == NaN) and which poisons every softmax row of the next
+// layer through the key path. Their finite garbage is zeroed by build_graph.
+const std::vector<float>* relpos_attention_mask(int T, int valid_len, int chunk_size, int left_chunks,
+                                                int att_left, int att_right, GraphInputPool& pool) {
+    // A full-context clip without padding masks nothing: skip building and uploading T*T zeros per layer.
+    if (valid_len >= T && chunk_size == 0 && att_left < 0) return nullptr;
+    std::vector<float>& mask_host = pool.alloc_f32((size_t)T * T);
+    float* md = mask_host.data();
+    const float ninf = -INFINITY;
+    for (int qi = 0; qi < T; ++qi) {
+        if (qi >= valid_len) {  // dead (padded) query row: see above
+            for (int kj = 0; kj < T; ++kj) md[(size_t)qi * T + kj] = 0.0f;
+            continue;
+        }
+        const int cq = chunk_size > 0 ? (qi / chunk_size) : 0;
+        for (int kj = 0; kj < T; ++kj) {
+            bool ok = (kj < valid_len);
+            if (ok && chunk_size > 0) {
+                const int ck = kj / chunk_size;
+                const int diff = cq - ck;
+                ok = (diff >= 0 && diff <= left_chunks);
+            }
+            // Symmetric sliding window (NeMo rel_pos_local_attn): keep only
+            // keys within [qi-att_left, qi+att_right].
+            if (ok && att_left >= 0) {
+                const int rel = qi - kj;
+                ok = (rel <= att_left) && (rel >= -att_right);
+            }
+            md[(size_t)qi * T + kj] = ok ? 0.0f : ninf;
+        }
+    }
+    return &mask_host;
+}
+
 RelPosAttention::RelPosAttention(const ModelLoader& ml, int layer_idx)
     : ml_(ml), layer_idx_(layer_idx) {
     d_model_ = (int)ml.config().d_model;
@@ -116,60 +165,23 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     ggml_tensor* ac = ggml_mul_mat(ctx, kh, qu); // [T(key), T(query), H]
 
     // ---- bd = q_v @ p^T -> [P(pos), T(query), H], then rel_shift -> [T,T,H] ----
-    ggml_tensor* bd = ggml_mul_mat(ctx, ph, qv); // [P, T, H]
-    bd = ggml_pad_ext(ctx, bd, /*lp0*/1, /*rp0*/0, 0,0, 0,0, 0,0); // [P+1=2T, T, H]
-    bd = ggml_reshape_3d(ctx, bd, T, 2 * T, H);                    // [T, 2T, H]
-    bd = ggml_view_3d(ctx, bd, T, 2 * T - 1, H,
-                      bd->nb[1], bd->nb[2], bd->nb[1]);            // [T, 2T-1, H]
-    bd = ggml_cont(ctx, bd);
-    bd = ggml_reshape_3d(ctx, bd, 2 * T - 1, T, H);               // [2T-1, T, H]
-    bd = ggml_view_3d(ctx, bd, T, T, H, bd->nb[1], bd->nb[2], 0);
-    bd = ggml_cont(ctx, bd);
+    ggml_tensor* bd = rel_shift(ctx, ggml_mul_mat(ctx, ph, qv)); // [P, T, H] -> [T, T, H]
 
     // ---- scores = ac + bd ; softmax(scores*scale + mask) ----
     ggml_tensor* scores = ggml_add(ctx, ac, bd); // [T_k, T_q, H]
 
-    // Additive mask [T_k, T_q]: 0 where query qi may attend to key kj, -inf
-    // otherwise. (1) pad mask: key kj valid iff kj < valid_len. (2) chunked-
-    // limited window for streaming models. See header / NeMo _create_masks.
-    // PADDED query rows (qi >= valid_len) are left fully unmasked: with a
-    // limited window a deeply padded row can have its ENTIRE row masked, and
-    // softmax over all -inf is NaN — which the post-softmax query mask does NOT
-    // clear (NaN*0 == NaN) and which poisons every softmax row of the next
-    // layer through the key path. Their finite garbage is zeroed below.
+    // Additive mask [T_k, T_q], or none when it would mask nothing: see relpos_attention_mask.
     const int chunk_size  = chunked_limited_ ? (att_right_ + 1) : 0;
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
-    std::vector<float>& mask_host = pool.alloc_f32((size_t)T * T);
-    {
-        float* md = mask_host.data();
-        const float ninf = -INFINITY;
-        for (int qi = 0; qi < T; ++qi) {
-            if (qi >= valid_len) {  // dead (padded) query row: see above
-                for (int kj = 0; kj < T; ++kj) md[(size_t)qi * T + kj] = 0.0f;
-                continue;
-            }
-            const int cq = chunked_limited_ ? (qi / chunk_size) : 0;
-            for (int kj = 0; kj < T; ++kj) {
-                bool ok = (kj < valid_len);
-                if (ok && chunked_limited_) {
-                    const int ck = kj / chunk_size;
-                    const int diff = cq - ck;
-                    ok = (diff >= 0 && diff <= left_chunks);
-                }
-                // Symmetric sliding window (NeMo rel_pos_local_attn): keep only
-                // keys within [qi-att_left, qi+att_right].
-                if (ok && att_left >= 0) {
-                    const int rel = qi - kj;
-                    ok = (rel <= att_left) && (rel >= -att_right);
-                }
-                md[(size_t)qi * T + kj] = ok ? 0.0f : ninf;
-            }
-        }
+    const std::vector<float>* mask_host = relpos_attention_mask(T, valid_len, chunk_size, left_chunks,
+                                                                att_left, att_right, pool);
+    ggml_tensor* mask = nullptr;
+    if (mask_host) {
+        int64_t mask_ne[2] = {T, T};
+        mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mask_ne,
+                                mask_host->data(), mask_host->size() * sizeof(float));
     }
-    int64_t mask_ne[2] = {T, T};
-    ggml_tensor* mask = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, mask_ne,
-                            mask_host.data(), mask_host.size() * sizeof(float));
     ggml_tensor* attn = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f); // [T_k, T_q, H]
 
     // ---- context = attn @ v -> [dk, T_q, H] ----

@@ -63,11 +63,30 @@ void Joint::precompute_enc_proj(const std::vector<float>& enc, int T, int enc_hi
     (void)H;
 }
 
+ggml_tensor* Joint::build_step(ggml_context* ctx, const float* enc_proj_t, ggml_tensor* g) const {
+    const int H = joint_hidden_;
+    // enc_proj row for frame t: [H].
+    int64_t ep_ne[1] = { H };
+    ggml_tensor* ep = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 1, ep_ne,
+                          enc_proj_t, (size_t)H * sizeof(float));
+    // pred_proj = pred.weight·g + pred.bias  (P->H). Weight ne=[P,H].
+    ggml_tensor* Wp = pk::clone_weight(ctx, ml_, "joint.pred.weight");
+    ggml_tensor* pp = ggml_mul_mat(ctx, Wp, g);             // [H]
+    ggml_tensor* bp = pk::clone_weight(ctx, ml_, "joint.pred.bias");
+    pp = ggml_add(ctx, pp, bp);
+    // f = ReLU(enc_proj + pred_proj)
+    ggml_tensor* f = ggml_relu(ctx, ggml_add(ctx, ep, pp)); // [H]
+    // logits = joint_net.2.weight·f + joint_net.2.bias (H->V). Weight ne=[H,V].
+    ggml_tensor* Wo = pk::clone_weight(ctx, ml_, "joint.joint_net.2.weight");
+    ggml_tensor* y  = ggml_mul_mat(ctx, Wo, f);             // [V]
+    ggml_tensor* bo = pk::clone_weight(ctx, ml_, "joint.joint_net.2.bias");
+    return ggml_add(ctx, y, bo);                            // [V_plus]
+}
+
 void Joint::step_logits(const float* enc_proj_t,
                         const float* g, int pred_hidden,
                         std::vector<float>& logits) const {
     assert(pred_hidden == pred_hidden_ && "pred_hidden mismatch");
-    const int H = joint_hidden_;
 
     // Per-step joint on the PERSISTENT backend (one reused graph; no per-call
     // ggml_init/gallocr churn — Backend::compute reuses the backend + gallocr).
@@ -79,27 +98,11 @@ void Joint::step_logits(const float* enc_proj_t,
     // on the 110m. The enc_proj input is the precomputed projection row for t.
     bool ok = pk::run_graph(0, 0,
         [&](ggml_context* ctx) -> ggml_tensor* {
-            // enc_proj row for frame t: [H].
-            int64_t ep_ne[1] = { H };
-            ggml_tensor* ep = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 1, ep_ne,
-                                  enc_proj_t, (size_t)H * sizeof(float));
             // pred-net output g: [P].
             int64_t g_ne[1] = { pred_hidden_ };
             ggml_tensor* gv = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 1, g_ne,
                                   g, (size_t)pred_hidden_ * sizeof(float));
-            // pred_proj = pred.weight·g + pred.bias  (P->H). Weight ne=[P,H].
-            ggml_tensor* Wp = pk::clone_weight(ctx, ml_, "joint.pred.weight");
-            ggml_tensor* pp = ggml_mul_mat(ctx, Wp, gv);            // [H]
-            ggml_tensor* bp = pk::clone_weight(ctx, ml_, "joint.pred.bias");
-            pp = ggml_add(ctx, pp, bp);
-            // f = ReLU(enc_proj + pred_proj)
-            ggml_tensor* f = ggml_relu(ctx, ggml_add(ctx, ep, pp)); // [H]
-            // logits = joint_net.2.weight·f + joint_net.2.bias (H->V). Weight ne=[H,V].
-            ggml_tensor* Wo = pk::clone_weight(ctx, ml_, "joint.joint_net.2.weight");
-            ggml_tensor* y  = ggml_mul_mat(ctx, Wo, f);             // [V]
-            ggml_tensor* bo = pk::clone_weight(ctx, ml_, "joint.joint_net.2.bias");
-            y = ggml_add(ctx, y, bo);
-            return y;                                               // [V_plus]
+            return build_step(ctx, enc_proj_t, gv);
         }, logits);
     assert(ok && "step_logits graph failed");
 }

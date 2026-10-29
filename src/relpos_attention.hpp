@@ -8,6 +8,20 @@ struct ggml_tensor;
 
 namespace pk {
 
+// NeMo's rel_shift of the position scores bd [P = 2T-1, T(query), H] for the single-clip attention, as a
+// strided view [T(key), T(query), H] of bd: no copy. Its rows are not contiguous, so it suits an op that
+// reads strided input, such as the ggml_add that consumes it in build_graph.
+ggml_tensor* rel_shift(ggml_context* ctx, ggml_tensor* bd);
+
+// The additive attention mask of RelPosAttention::build_graph, row-major [T_q, T_k]: 0 where query qi
+// may attend to key kj, -inf where it may not. Keys at or past valid_len are masked, and rows of padded
+// queries stay all 0. With chunk_size > 0, keys outside the chunked-limited window (left_chunks chunks
+// back) are masked too; with att_left >= 0, keys outside [qi - att_left, qi + att_right]. The mask is
+// allocated in `pool`. Returns null, allocating nothing, when no entry would be -inf (valid_len >= T,
+// chunk_size 0, att_left < 0): softmax then runs without a mask.
+const std::vector<float>* relpos_attention_mask(int T, int valid_len, int chunk_size, int left_chunks,
+                                                int att_left, int att_right, GraphInputPool& pool);
+
 // Relative-position multi-head self-attention (Transformer-XL style) as used by
 // the FastConformer encoder — NeMo RelPositionMultiHeadAttention.
 //

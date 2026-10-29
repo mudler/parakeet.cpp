@@ -28,6 +28,14 @@ struct TdtBeamHypothesis {
     float normalized_score = 0.0f;
 };
 
+// One prediction-net step and the joint for one frame, as one graph: on a GPU each compute is a round
+// trip. Gives what pred.step(token_id, is_sos, in, g, out_state) followed by joint.step_logits(enc_proj_t,
+// g, ...) give, into g, out_state and logits [V_plus]. x0 is scratch for the layer-0 input. tdt_greedy
+// runs it whenever the prediction output is stale.
+bool pred_joint_step(const PredictionNet& pred, const Joint& joint, int32_t token_id, bool is_sos,
+                     const PredState& in, const float* enc_proj_t, std::vector<float>& x0,
+                     std::vector<float>& g, PredState& out_state, std::vector<float>& logits);
+
 // TDT (Token-and-Duration Transducer) duration-aware greedy decoding.
 //
 // Ports NeMo GreedyTDTInfer._greedy_decode (rnnt_greedy_decoding.py). Drives the

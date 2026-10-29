@@ -1,13 +1,14 @@
 #include "pos_enc.hpp"
 #include <cmath>
 #include <cassert>
+#include <mutex>
 
 namespace pk {
 
 // INF_VAL from NeMo multi_head_attention.py (used as the sinusoid base).
 static constexpr double kInfVal = 10000.0;
 
-void rel_pos_encoding(int T, int d_model, std::vector<float>& out) {
+static void build_rel_pos_encoding(int T, int d_model, std::vector<float>& out) {
     assert(T > 0 && d_model > 0 && (d_model % 2) == 0);
     const int P = 2 * T - 1;             // number of relative positions
     const int half = d_model / 2;        // number of (sin,cos) pairs
@@ -31,6 +32,22 @@ void rel_pos_encoding(int T, int d_model, std::vector<float>& out) {
             row[2 * i + 1] = (float)std::cos(arg);   // odd dims
         }
     }
+}
+
+// Row p holds position (T-1)-p, so the table for T is rows [Tmax-T, Tmax+T-1) of the table for any
+// Tmax >= T, bit for bit. One table, grown to the longest clip so far, spares the sin/cos per call.
+void rel_pos_encoding(int T, int d_model, std::vector<float>& out) {
+    static std::mutex mu;
+    static int table_T = 0, table_d = 0;
+    static std::vector<float> table;
+    std::lock_guard<std::mutex> lock(mu);
+    if (d_model != table_d || T > table_T) {
+        build_rel_pos_encoding(T, d_model, table);
+        table_T = T;
+        table_d = d_model;
+    }
+    const auto first = table.begin() + (std::ptrdiff_t)(table_T - T) * d_model;
+    out.assign(first, first + (std::ptrdiff_t)(2 * T - 1) * d_model);
 }
 
 void local_rel_pos_encoding(int att_left, int att_right, int d_model,

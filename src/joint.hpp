@@ -2,6 +2,9 @@
 #include "model_loader.hpp"
 #include <vector>
 
+struct ggml_context;
+struct ggml_tensor;
+
 namespace pk {
 
 // RNN-Transducer joint network — NeMo RNNTJoint.
@@ -65,6 +68,10 @@ public:
     void step_logits(const float* enc_proj_t,
                      const float* g, int pred_hidden,
                      std::vector<float>& logits) const;
+
+    // The graph of step_logits inside a caller's graph, with g already a tensor there (the prediction
+    // net's output, so the two run as one compute). Returns the logits tensor [V_plus].
+    ggml_tensor* build_step(ggml_context* ctx, const float* enc_proj_t, ggml_tensor* g) const;
 
     // Batched per-step joint for N items.
     // enc_proj_gathered: [joint_hidden * N], each item's enc_proj row for its

@@ -1,5 +1,7 @@
 #include "tdt.hpp"
 #include "decode_common.hpp"
+#include "backend.hpp"
+#include "ggml_graph.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -7,6 +9,16 @@
 #include <utility>
 
 namespace pk {
+
+bool pred_joint_step(const PredictionNet& pred, const Joint& joint, int32_t token_id, bool is_sos,
+                     const PredState& in, const float* enc_proj_t, std::vector<float>& x0,
+                     std::vector<float>& g, PredState& out_state, std::vector<float>& logits) {
+    return pk::run_graph(0, 0, [&](ggml_context* ctx) -> ggml_tensor* {
+        ggml_tensor* gt = pred.build_step(ctx, token_id, is_sos, in, x0, out_state);
+        pk::capture_graph_output(gt, &g);
+        return joint.build_step(ctx, enc_proj_t, gt);
+    }, logits);
+}
 
 std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 const std::vector<float>& enc, int T, int enc_hidden,
@@ -43,6 +55,7 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
     std::vector<float> g;
     PredState out_state;
     std::vector<float> logits;
+    std::vector<float> x0;  // the fused step's layer-0 input
 
     // Prediction-net output cache: `g`/`out_state` depend only on the committed
     // (last_token, lstm_state), which change exclusively on an emit (k != blank).
@@ -61,21 +74,25 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
             // Prediction net step from the committed state — only when the cache
             // is stale (first step, or the previous step emitted). SOS until the
             // first emit; otherwise feed the last EMITTED token.
-            if (!g_valid) {
-                const bool is_sos = !emitted_any;
-                const int32_t last_label = emitted_any ? last_token : blank_id;
-                pred.step(last_label, is_sos, committed, g, out_state);
-                g_valid = true;
-            }
-
             // Joint for (t,u): precomputed enc_proj[t] x g -> raw logits [V_plus].
             // `t` is always in [0, T): the outer loop guards the first inner
             // iteration, and subsequent inner iterations only run when skip==0
             // (t unchanged). A positive skip exits the inner loop. This matches
             // the old per-step `enc[t*enc_hidden]` access exactly.
             assert(t < T && "enc_proj row out of range");
-            joint.step_logits(enc_proj.data() + (size_t)t * H,
-                              g.data(), (int)g.size(), logits);
+            if (!g_valid) {
+                // The prediction step and this joint run as one graph: on a GPU each compute is a round trip.
+                const bool is_sos = !emitted_any;
+                const int32_t last_label = emitted_any ? last_token : blank_id;
+                bool ok = pred_joint_step(pred, joint, last_label, is_sos, committed,
+                                          enc_proj.data() + (size_t)t * H, x0, g, out_state, logits);
+                assert(ok && "fused pred-net + joint step graph failed");
+                (void)ok;
+                g_valid = true;
+            } else {
+                joint.step_logits(enc_proj.data() + (size_t)t * H,
+                                  g.data(), (int)g.size(), logits);
+            }
 
             // Split: token logits [0, token_count), duration logits [token_count, V_plus).
             const int k   = decode_argmax(logits.data(), token_count);

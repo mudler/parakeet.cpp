@@ -10,6 +10,8 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+#include <map>
+#include <mutex>
 #include <vector>
 
 namespace pk {
@@ -18,24 +20,54 @@ namespace pk {
 // Kept identical to MelFrontend::compute so the per-feature norm matches.
 static constexpr double kNormEps = 1e-5;
 
-GpuMel::GpuMel(const ModelLoader& ml) : k_(ml) {
+std::shared_ptr<const DftBasis> dft_basis(int N, int B) {
+    static std::mutex mu;
+    static std::map<std::pair<int, int>, std::shared_ptr<const DftBasis>> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    std::shared_ptr<const DftBasis>& entry = cache[{N, B}];
+    if (entry) return entry;
     // DFT basis matching pk::rfft's convention (no normalization), so the matmul
     // re/im equal the FFT's:  re[b] =  Σ_n x[n] cos(2π b n / N)
     //                         im[b] = -Σ_n x[n] sin(2π b n / N)
-    // Row-major [n_bins, n_fft]: dft_cos_[b*n_fft + n], dft_sin_[b*n_fft + n].
-    const int N = k_.n_fft_;
-    const int B = k_.n_bins_;
-    dft_cos_.assign((size_t)B * N, 0.0f);
-    dft_sin_.assign((size_t)B * N, 0.0f);
+    // Row-major [n_bins, n_fft]: cos[b*n_fft + n], sin[b*n_fft + n].
+    auto basis = std::make_shared<DftBasis>();
+    basis->cos.assign((size_t)B * N, 0.0f);
+    basis->sin.assign((size_t)B * N, 0.0f);
     const double two_pi = 2.0 * M_PI;
     for (int b = 0; b < B; ++b) {
         for (int n = 0; n < N; ++n) {
             const double ang = two_pi * (double)b * (double)n / (double)N;
-            dft_cos_[(size_t)b * N + n] = (float)std::cos(ang);
-            dft_sin_[(size_t)b * N + n] = (float)(-std::sin(ang));
+            basis->cos[(size_t)b * N + n] = (float)std::cos(ang);
+            basis->sin[(size_t)b * N + n] = (float)(-std::sin(ang));
         }
     }
+    entry = basis;
+    return entry;
 }
+
+void gpu_mel_frames(const std::vector<float>& samples, float preemph, const std::vector<float>& window,
+                    int n_fft, int hop, int T, std::vector<float>& Xw) {
+    // Xw[t*n_fft + i] = (float)(padded[t*hop + i] * (double)window[i]), where padded is the preemphasized
+    // signal (in double, exactly like MelFrontend) centred in n_fft/2 zeros. Each padded sample is computed
+    // where it is read, so no copy of the signal is allocated: two such double arrays took ~7 ms per minute.
+    const int S = (int)samples.size();
+    const int pad = n_fft / 2;
+    auto padded = [&](int j) -> double {
+        const int t = j - pad;
+        if (t < 0 || t >= S) return 0.0;
+        if (preemph > 0.0f && t > 0) return (double)samples[t] - (double)preemph * (double)samples[t - 1];
+        return samples[t];
+    };
+    Xw.resize((size_t)T * n_fft);
+    for (int t = 0; t < T; ++t) {
+        const int start = t * hop;
+        float* row = &Xw[(size_t)t * n_fft];
+        for (int i = 0; i < n_fft; ++i)
+            row[i] = (float)(padded(start + i) * (double)window[i]);
+    }
+}
+
+GpuMel::GpuMel(const ModelLoader& ml) : k_(ml), dft_(dft_basis(k_.n_fft_, k_.n_bins_)) {}
 
 void GpuMel::compute(const std::vector<float>& samples,
                      std::vector<float>& feats, int& n_mels, int& T) const {
@@ -52,16 +84,6 @@ void GpuMel::compute(const std::vector<float>& samples,
     const int n_bins_  = k_.n_bins_;
     const float preemph_ = k_.preemph_;
 
-    // ----- Preemphasis (double, exactly like MelFrontend) -----
-    std::vector<double> x((size_t)S);
-    if (preemph_ > 0.0f && S > 0) {
-        x[0] = samples[0];
-        for (int t = 1; t < S; ++t)
-            x[t] = (double)samples[t] - (double)preemph_ * (double)samples[t - 1];
-    } else {
-        for (int t = 0; t < S; ++t) x[t] = samples[t];
-    }
-
     const int seq_len = (S > 0) ? (S / hop_) : 0;
 
     // ----- Center zero-pad (constant), then frame count (identical to MelFrontend) -----
@@ -71,9 +93,6 @@ void GpuMel::compute(const std::vector<float>& samples,
     T = n_frames;
     n_mels = n_mels_;
 
-    std::vector<double> padded((size_t)padded_len, 0.0);
-    for (int j = 0; j < S; ++j) padded[pad + j] = x[j];
-
     feats.assign((size_t)n_mels_ * T, 0.0f);
     if (T == 0) {
         // Mirror MelFrontend: per_feature norm over zero frames is a no-op.
@@ -81,15 +100,8 @@ void GpuMel::compute(const std::vector<float>& samples,
     }
 
     // ----- Windowed frame matrix Xw [T, n_fft] row-major (row t = frame t) -----
-    // Xw[t*n_fft + i] = (float)(padded[t*hop + i] * (double)window_[i]). Matches
-    // MelFrontend's per-frame windowing exactly.
-    std::vector<float> Xw((size_t)T * n_fft_);
-    for (int t = 0; t < T; ++t) {
-        const int start = t * hop_;
-        float* row = &Xw[(size_t)t * n_fft_];
-        for (int i = 0; i < n_fft_; ++i)
-            row[i] = (float)(padded[(size_t)start + i] * (double)k_.window_[i]);
-    }
+    std::vector<float> Xw;
+    gpu_mel_frames(samples, preemph_, k_.window_, n_fft_, hop_, T, Xw);
 
     // ----- ggml graph: DFT-matmul -> power -> filterbank -> log -> feat-major -----
     const float guard = k_.log_guard_;
@@ -102,9 +114,9 @@ void GpuMel::compute(const std::vector<float>& samples,
             // DFT basis: ne=[n_fft, n_bins] (row b over n).
             int64_t basis_ne[2] = { n_fft_, n_bins_ };
             ggml_tensor* cosb = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, basis_ne,
-                                    dft_cos_.data(), (size_t)n_bins_ * n_fft_ * sizeof(float));
+                                    dft_->cos.data(), (size_t)n_bins_ * n_fft_ * sizeof(float));
             ggml_tensor* sinb = pk::graph_input_tensor(ctx, GGML_TYPE_F32, 2, basis_ne,
-                                    dft_sin_.data(), (size_t)n_bins_ * n_fft_ * sizeof(float));
+                                    dft_->sin.data(), (size_t)n_bins_ * n_fft_ * sizeof(float));
 
             // re[t][b] = Σ_n cos(b,n) * Xw[t][n]; im likewise. -> ne=[n_bins, T].
             ggml_tensor* re = ggml_mul_mat(ctx, cosb, xw);

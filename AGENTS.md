@@ -130,6 +130,21 @@ tests/               ctest targets
                        test_audio_io.cpp       , wav load + resample (model-independent)
                        test_fft.cpp            , FFT cross-check (model-independent)
                        test_backend_pool.cpp   , backend pool routing, limits, reentrancy, shutdown (model-independent)
+                       test_depthwise_conv.cpp , conv module's depthwise conv: SSM_CONV and im2col == NeMo's conv on the CPU backend (model-independent)
+                       test_depthwise_conv_path.cpp, when the depthwise conv falls back to im2col (model-independent)
+                       test_depthwise_conv_gpu.cpp, depthwise conv on each GPU device: SSM_CONV chosen, == CPU im2col (label gpu; 77 without a GPU)
+                       depthwise_conv_cases.hpp, NeMo's depthwise conv on the host and a run of the builder, shared by the three above
+                       gpu_devices.hpp         , GPU device list and skip helper for the gpu-labelled tests
+                       test_relpos_mask.cpp    , single-clip attention mask == NeMo's, skipped only when it masks nothing; softmax unchanged (model-independent)
+                       test_pos_enc_cache.cpp  , relative position table from the grown cache == a fresh table, any order of lengths, widths, threads (model-independent)
+                       test_mel_gpu_basis.cpp  , GpuMel's shared DFT basis: one per size, == the per-instance basis, thread-safe (model-independent)
+                       test_mel_gpu.cpp --gpu  , ctest test_mel_gpu_device: GpuMel on the first GPU device vs MelFrontend (PARAKEET_TEST_GGUF; label gpu; 77 without a GPU)
+                       test_backend_readback_gpu.cpp, Backend::compute on each GPU device: every capture and the output hold this compute's values, gallocr and scheduler paths (label gpu; 77 without a GPU)
+                       test_pred_joint_step.cpp, fused prediction + joint step == the separate graphs, step() == a host LSTM, SOS fetches the embedding table (PARAKEET_TEST_GGUF; --gpu: ctest test_pred_joint_step_gpu, label gpu)
+                       test_mel_gpu_frames.cpp , GpuMel's framing == the two-copy framing it replaced, bit for bit (model-independent)
+                       test_rel_shift.cpp      , strided rel_shift view and the scores ac + rel_shift(bd) == NeMo's rel_shift, bit for bit (model-independent)
+                       test_relpos_attention_gpu.cpp, on each GPU device: the strided scores add, and softmax without a mask == with a zero mask (label gpu; 77 without a GPU)
+                       relpos_cases.hpp        , NeMo rel_shift on the host, shared by the two above
                        test_capi_concurrency.cpp, set_concurrency + concurrent last_error writes (PARAKEET_TEST_GGUF)
                        test_pool_stress.cpp    , N threads x K backends == single-thread results; PARAKEET_STRESS_QUICK=1 for slow builds (PARAKEET_TEST_GGUF, _ULTRA, _REDUX_KEEP)
                        test_pool_shutdown.cpp  , pool create/destroy leaves no threads, results equal (PARAKEET_TEST_GGUF)
@@ -271,6 +286,7 @@ Ultra/Redux tests read `PARAKEET_TEST_GGUF_ULTRA` (F16 Ultra),
 | ------- | ------------------------------------------------------------ | ------------------ |
 | (none)  | `test_smoke`, `test_audio_io`, `test_fft`                    | nothing            |
 | `model` | `test_model_loader`, `test_capi`, `test_transcribe_*`, `check_*` | venv + checkpoint  |
+| `gpu`   | `test_depthwise_conv_gpu`, `test_mel_gpu_device`, `test_backend_readback_gpu`, `test_pred_joint_step_gpu`, `test_relpos_attention_gpu`; each exits 77 without a GPU device | a GPU build + GPU  |
 
 ## Converting a model
 

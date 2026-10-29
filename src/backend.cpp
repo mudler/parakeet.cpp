@@ -181,6 +181,11 @@ bool active_backend_is_cpu() {
     return t_active != nullptr && t_active->is_cpu();
 }
 
+bool active_backend_supports(const ggml_tensor* op) {
+    return t_active != nullptr && t_active->handle() != nullptr &&
+           ggml_backend_supports_op(t_active->handle(), op);
+}
+
 size_t Backend::graph_alloc_bytes() const {
     return impl_ ? impl_->alloc_bytes.load(std::memory_order_relaxed) : 0;
 }
@@ -321,9 +326,11 @@ bool Backend::compute(const std::function<ggml_tensor*(ggml_context*)>& build,
     }
     impl_->pending.clear();
 
+    // Without the scheduler, queue the readbacks behind the compute and wait once: a decode step reads up to
+    // five small tensors, and a separate wait for each costs more than the GPU work itself.
     enum ggml_status status = need_sched
         ? ggml_backend_sched_graph_compute(impl_->sched, gf)
-        : ggml_backend_graph_compute(impl_->backend, gf);
+        : ggml_backend_graph_compute_async(impl_->backend, gf);
     if (status != GGML_STATUS_SUCCESS) {
         PK_LOG("Backend::compute: ggml_backend_graph_compute failed (status=%d)",
                (int)status);
@@ -337,13 +344,18 @@ bool Backend::compute(const std::function<ggml_tensor*(ggml_context*)>& build,
     for (const PendingCapture& pc : impl_->captures) {
         size_t cn = (size_t)ggml_nelements(pc.tensor);
         pc.dst->resize(cn);
-        ggml_backend_tensor_get(pc.tensor, pc.dst->data(), 0, cn * sizeof(float));
+        if (need_sched) ggml_backend_tensor_get(pc.tensor, pc.dst->data(), 0, cn * sizeof(float));
+        else ggml_backend_tensor_get_async(impl_->backend, pc.tensor, pc.dst->data(), 0, cn * sizeof(float));
     }
     impl_->captures.clear();
 
     size_t n = (size_t)ggml_nelements(output);
     out.resize(n);
-    ggml_backend_tensor_get(output, out.data(), 0, n * sizeof(float));
+    if (need_sched) ggml_backend_tensor_get(output, out.data(), 0, n * sizeof(float));
+    else {
+        ggml_backend_tensor_get_async(impl_->backend, output, out.data(), 0, n * sizeof(float));
+        ggml_backend_synchronize(impl_->backend);
+    }
 
     ggml_free(ctx);
     return true;

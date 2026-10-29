@@ -1,6 +1,7 @@
 #pragma once
 #include "model_loader.hpp"
 #include "graph_builder.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -8,6 +9,29 @@ struct ggml_context;
 struct ggml_tensor;
 
 namespace pk {
+
+// How the conv module's depthwise Conv1d (groups = C) is computed. Production passes Auto; tests force a
+// path to compare the two graphs on one backend.
+enum class DepthwiseConvPath {
+    Auto,    // SsmConv where depthwise_conv_takes_ssm says so, else Im2col
+    Im2col,  // per-item im2col + mul_mat, then a transpose
+    SsmConv, // one SSM_CONV over the padded input, batch on ne2
+};
+
+// Whether Auto takes SSM_CONV. Never on the CPU: it was no faster there, and the NeMo parity tests stay
+// bit-identical. Only at the widths ggml-cuda has kernels for (3, 4, 5, 9, 15): its supports_op does not
+// check the width, and it aborts on others. Only when `backend_runs_ops` says the backend runs the pad and
+// the SSM_CONV, since an op it declines sends the whole graph through the scheduler's CPU fallback. That
+// callback builds the two ops to ask about them, so it runs only after the first two checks pass.
+bool depthwise_conv_takes_ssm(bool backend_is_cpu, int K,
+                              const std::function<bool()>& backend_runs_ops);
+
+// Depthwise Conv1d of x_tcb [T, C, B] (contiguous) with weight dww [K, 1, C], NeMo's cross-correlation
+// with K - 1 zeros on the left when causal, else (K - 1) / 2 on each side (K odd). Returns [C, T, B].
+// Must be called from inside a build lambda passed to Backend::compute.
+ggml_tensor* build_depthwise_conv(ggml_context* ctx, ggml_tensor* x_tcb, ggml_tensor* dww,
+                                  int K, bool causal,
+                                  DepthwiseConvPath path = DepthwiseConvPath::Auto);
 
 // A single FastConformer encoder layer (NeMo ConformerLayer), built per-layer
 // from the GGUF weights. Mirrors NeMo's ConformerLayer.forward exactly:
