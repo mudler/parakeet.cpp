@@ -51,7 +51,7 @@ if (tail) { printf("%s\n", tail); parakeet_capi_free_string(tail); }
 parakeet_capi_stream_free(s);
 ```
 
-`<EOU>` (end-of-utterance) and `<EOB>` (backchannel) are stripped from the text and surfaced via `*eou_out` (the CLI `--stream` prints them as `[EOU @ <t>s]` markers). The streaming transcript matches NeMo's cache-aware streaming exactly, and `finalize` flushes the end-of-stream tail without fabricating an `<EOU>` that NeMo would not emit.
+`<EOU>` (end-of-utterance) and `<EOB>` (backchannel) are stripped from the text and surfaced via `*eou_out` (the CLI `--stream` prints them as `[EOU @ <t>s]` markers). Other special pieces, such as the language tags a prompt-conditioned model emits, are stripped from the text and the words. The streaming transcript matches NeMo's cache-aware streaming exactly, and `finalize` flushes the end-of-stream tail without fabricating an `<EOU>` that NeMo would not emit.
 
 ## Buffered streaming (unified checkpoints, ABI v11)
 

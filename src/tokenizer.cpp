@@ -16,7 +16,8 @@ std::string detokenize(const std::vector<std::string>& pieces,
         }
     }
 
-    // Step 2: replace every occurrence of META_SPACE (▁) with a regular space.
+    // Step 2: replace every occurrence of META_SPACE (▁) with a regular space, but
+    // never two in a row (a lone ▁ before a stripped language tag would double it).
     std::string out;
     out.reserve(result.size());
     for (size_t i = 0; i < result.size(); ) {
@@ -25,7 +26,9 @@ std::string detokenize(const std::vector<std::string>& pieces,
             (unsigned char)result[i]   == 0xE2 &&
             (unsigned char)result[i+1] == 0x96 &&
             (unsigned char)result[i+2] == 0x81) {
-            out += ' ';
+            if (out.empty() || out.back() != ' ') {
+                out += ' ';
+            }
             i += META_SPACE_LEN;
         } else {
             out += result[i++];
@@ -39,16 +42,19 @@ std::string detokenize(const std::vector<std::string>& pieces,
     return out;
 }
 
+bool is_special_piece(const std::string& piece) {
+    return !piece.empty() &&
+           ((piece.front() == '<' && piece.back() == '>') ||
+            (piece.front() == '[' && piece.back() == ']'));
+}
+
 std::vector<int32_t> strip_special_tokens(const std::vector<std::string>& pieces,
                                           const std::vector<int32_t>& ids) {
     std::vector<int32_t> out;
     out.reserve(ids.size());
     for (int32_t id : ids) {
         if (id >= 0 && (size_t)id < pieces.size()) {
-            const std::string& piece = pieces[(size_t)id];
-            if (!piece.empty() &&
-                ((piece.front() == '<' && piece.back() == '>') ||
-                 (piece.front() == '[' && piece.back() == ']'))) {
+            if (is_special_piece(pieces[(size_t)id])) {
                 continue;
             }
         }

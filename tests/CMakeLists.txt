@@ -79,6 +79,7 @@ pk_add_test(test_special_token_filter)
 # needs the real tokenizer.json (PARAKEET_BPE_TOKENIZER_JSON) and skips (77) without it.
 pk_add_test(test_bpe_tokenizer)
 pk_add_test(test_bpe_tokenizer_real)
+pk_add_test(test_stream_special_pieces)
 pk_add_test(test_transcribe)
 pk_add_test(test_transcribe_speech)
 pk_add_test(test_transcribe_tiled)

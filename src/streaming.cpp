@@ -98,6 +98,11 @@ void StreamingSession::reset() {
     words_taken_ = 0;
 }
 
+bool StreamingSession::is_special_id(int32_t tok) const {
+    const auto& pieces = ml_.config().tokenizer_pieces;
+    return tok >= 0 && (size_t)tok < pieces.size() && is_special_piece(pieces[(size_t)tok]);
+}
+
 void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
     last_chunk_had_eou_ = false;
     const size_t ns_before = non_special_.size();
@@ -114,7 +119,7 @@ void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
             ev.time_sec = ev.encoder_frame * frame_sec_;
             events_.push_back(ev);
             last_chunk_had_eou_ = true;
-        } else {
+        } else if (!is_special_id(tok)) {  // language tags such as <en-US> are not text
             non_special_.push_back(tok);
         }
     }
@@ -189,7 +194,7 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
             events_[evi].encoder_frame = abs_frame;
             events_[evi].time_sec = abs_frame * frame_sec_;
             ++evi;
-        } else {
+        } else if (!is_special_id(emitted[i])) {
             TokenInfo ti = chunk_tokens[i];
             ti.frame += base_frame;  // local -> absolute encoder frame
             word_tokens_.push_back(ti);
