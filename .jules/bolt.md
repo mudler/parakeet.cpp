@@ -1,0 +1,3 @@
+## 2025-05-18 - Audio Decoding and Mel Spectrogram Frontend Optimizations
+**Learning:** For audio processing in ASR pipelines, audio loading defaults (like mono 16kHz WAVs) and mel feature extraction (preemphasis and mag_power) often contain redundant memory passes, double conversions, and loop divisions. Precomputing inverse ratios/channel counts, fast-pathing 1-channel PCM copies, and fusing preemphasis into the zero-padded STFT buffer eliminate multi-megabyte allocations and floating-point divisions per utterance.
+**Action:** Always inspect audio frontend loops for double-division (`/ ratio`, `/ ch`), redundant `vector` allocations before padding, and `mag_power` special cases (`mag_power == 2.0` vs `1.0`).

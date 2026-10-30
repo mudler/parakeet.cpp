@@ -440,15 +440,13 @@ void Subsampling::forward_tiled(const std::vector<float>& mel, int n_mels, int T
     const int vo = valid_out_len(T, -1);
     valid_len = (vo > Tp) ? Tp : vo;
 
-    // TODO: causal tiling needs the causal phase mapping; offline causal long-audio
-    // is not a current target. Fall back to the single, untiled graph (== forward()).
-    if (causal_ || tile_out_frames <= 0) {
+    if (tile_out_frames <= 0) {
         int t_unused = 0, dm_unused = 0, vl_unused = 0;
         forward(mel, n_mels, T, out, t_unused, dm_unused, vl_unused, -1);
         return;
     }
 
-    // Non-causal symmetric-pad tiling. Receptive field is +-7 mel frames; output
+    // Tiled subsampling. Receptive field is 15 mel frames; output
     // frame o has mel center 8*o. Window start ws is a multiple of 8, so the
     // window-output frame j maps to global o = j + ws/8. A generous halo H=64 mel
     // frames (>> RF) keeps every emitted frame's RF inside the fed window (or, at

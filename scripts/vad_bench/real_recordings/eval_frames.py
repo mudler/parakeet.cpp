@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Compute per-recording confusion counts (tp,fp,fn,tn on 10 ms cells) + number of speech regions for every system spec. -> results/counts.pkl"""
-import os, sys, pickle, itertools, time
+"""Compute per-recording confusion counts (tp,fp,fn,tn on 10 ms cells) + number of speech regions for every system spec. -> results/counts.json"""
+import os, sys, json, itertools, time
 import numpy as np
 from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,5 +49,6 @@ if __name__ == "__main__":
     with Pool(10) as p: res = dict(p.map(work, D, chunksize=1))
     os.makedirs(f"{vr.ROOT}/results", exist_ok=True)
     meta = [dict(id=m["id"], domain=m["domain"], split=m["split"], dur=m["dur"], nonspeech=m["nonspeech"]) for m in D]
-    pickle.dump(dict(specs=SPECS, meta=meta, counts=np.stack([res[m["id"]] for m in D])), open(f"{vr.ROOT}/results/counts.pkl", "wb"))
+    counts_data = np.stack([res[m["id"]] for m in D]).tolist()
+    json.dump(dict(specs=SPECS, meta=meta, counts=counts_data), open(f"{vr.ROOT}/results/counts.json", "w"))
     print("done", time.time() - t)

@@ -1,9 +1,18 @@
 """results loader + bootstrap helpers"""
-import pickle, numpy as np, os, sys
+import json, numpy as np, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vr
-R = pickle.load(open(f"{vr.ROOT}/results/counts.pkl", "rb"))
-SP = R["specs"]; C = R["counts"]; M = R["meta"]; IDX = {s: i for i, s in enumerate(SP)}
+
+def _to_tuple(x):
+    if isinstance(x, list):
+        return tuple(_to_tuple(i) for i in x)
+    return x
+
+R = json.load(open(f"{vr.ROOT}/results/counts.json", "r"))
+SP = [_to_tuple(s) for s in R["specs"]]
+C = np.array(R["counts"])
+M = R["meta"]
+IDX = {s: i for i, s in enumerate(SP)}
 SPEECH_DOM = ("vox", "ami", "ava"); NS_DOM = ("music", "noise", "esc")
 def sel(domains=None, split=None):
     return np.array([i for i, m in enumerate(M) if (domains is None or m["domain"] in domains) and (split is None or m["split"] == split)])
