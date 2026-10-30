@@ -27,6 +27,10 @@ MelKernel::MelKernel(const ModelLoader& ml) {
     per_feature_ = (c.normalize == "per_feature");
     valid_length_ = c.unified.present && c.unified.valid_length;
 
+    // Realize first: on a device backend this swaps in device tensors and frees
+    // the host context, so a tensor pointer taken before it would dangle.
+    pk::ensure_weights_realized(ml);
+
     // --- Window: lift the Hann window from the GGUF and center-pad to n_fft. ---
     // NeMo builds torch.hann_window(win_length, periodic=False) and passes it to
     // torch.stft with win_length < n_fft, so torch zero-pads the window to n_fft,

@@ -134,6 +134,10 @@ private:
     // brand-new EOU/EOB events found beyond events_seen_tokens_.
     void process_emitted(const std::vector<int32_t>& emitted);
 
+    // True for a bracketed special piece other than EOU/EOB, such as the
+    // language tag a prompt-conditioned model emits; it is never text.
+    bool is_special_id(int32_t tok) const;
+
     const ModelLoader& ml_;
     StreamingEncoder enc_;
     PredictionNet pred_;

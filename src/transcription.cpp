@@ -91,9 +91,25 @@ std::set<std::string> extract_punctuation(const std::vector<std::string>& pieces
 
 } // namespace
 
-std::vector<Word> group_words(const std::vector<TokenInfo>& tokens,
+std::vector<Word> group_words(const std::vector<TokenInfo>& tokens_in,
                               const std::vector<std::string>& pieces,
                               float frame_sec) {
+    // Language tags such as <en-US> are not words. The model emits a bare `▁`
+    // piece before each tag, which would otherwise become an empty word.
+    auto piece_at = [&](const TokenInfo& t) -> const std::string* {
+        return t.id >= 0 && (size_t)t.id < pieces.size() ? &pieces[(size_t)t.id] : nullptr;
+    };
+    std::vector<TokenInfo> tokens;
+    tokens.reserve(tokens_in.size());
+    for (const TokenInfo& t : tokens_in) {
+        const std::string* pc = piece_at(t);
+        if (pc && is_special_piece(*pc)) {
+            const std::string* prev = tokens.empty() ? nullptr : piece_at(tokens.back());
+            if (prev && *prev == META_SPACE) tokens.pop_back();
+            continue;
+        }
+        tokens.push_back(t);
+    }
     std::vector<Word> words;
     const int n = (int)tokens.size();
     if (n == 0) return words;
