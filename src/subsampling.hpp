@@ -80,10 +80,16 @@ public:
     // produces, applying ggml conv2d's per-stage OH = floor((in+2p-k)/s)+1 for
     // all three stride-2, k=3 stages. Used for subsampling-tile bookkeeping.
     int subsample_len(int T) const;
+    // Valid mel frames at the entry of the offline conv stack for a mel of T
+    // frames. Offline NeMo reports T-1 (the center-padded mel carries one
+    // extra trailing frame). Unified checkpoints (parakeet.unified.valid_length)
+    // trim the mel to NeMo's `length` already, so every frame is valid: T.
+    int offline_entry_valid(int T) const { return T - (trim_extra_frame_ ? 1 : 0); }
 private:
     const ModelLoader& ml_;
     int conv_channels_;   // C
     int d_model_;         // out features
+    bool trim_extra_frame_ = true; // false: mel already trimmed to its valid length
     bool causal_ = false; // causal_downsampling: left-heavy conv padding (streaming)
 };
 

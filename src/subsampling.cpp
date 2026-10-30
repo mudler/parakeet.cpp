@@ -20,6 +20,7 @@ Subsampling::Subsampling(const ModelLoader& ml)
     conv_channels_ = (int)ml.config().subsampling_conv_channels;
     d_model_       = (int)ml.config().d_model;
     causal_        = ml.config().causal_downsampling;
+    trim_extra_frame_ = !(ml.config().unified.present && ml.config().unified.valid_length);
 }
 
 int Subsampling::valid_out_len(int T, int in_valid_frames) const {
@@ -39,7 +40,7 @@ int Subsampling::valid_out_len(int T, int in_valid_frames) const {
     // Streaming (in_valid_frames >= 0): the chunk window is fully real audio, so
     // the entry valid length is the supplied count (typically T), NOT T-1.
     const int all_paddings = causal_ ? 3 : 2;
-    int valid = (in_valid_frames >= 0) ? in_valid_frames : (T - 1);
+    int valid = (in_valid_frames >= 0) ? in_valid_frames : offline_entry_valid(T);
     for (int st = 0; st < 3; ++st)            // conv0, conv2, conv5
         valid = (valid + all_paddings - 3) / 2 + 1;
     return valid;
@@ -147,7 +148,7 @@ ggml_tensor* Subsampling::build_graph_batched(ggml_context* ctx,
     std::vector<int> vt_stage0(B), vt_stage1(B), vt_stage2(B); // input of stage0/1/2
     for (int b = 0; b < B; ++b) {
         int vi = (b < (int)valid_in.size()) ? valid_in[b] : -1;
-        int v0 = (vi >= 0) ? vi : (T - 1);          // before stage 0
+        int v0 = (vi >= 0) ? vi : offline_entry_valid(T);        // before stage 0
         int v1 = (v0 + all_paddings - 3) / 2 + 1;   // before stage 1 (after stage 0)
         int v2 = (v1 + all_paddings - 3) / 2 + 1;   // before stage 2 (after stage 1)
         vt_stage0[b] = v0;
@@ -310,7 +311,7 @@ ggml_tensor* Subsampling::build_graph(ggml_context* ctx,
                               md.data(), md.size() * sizeof(float));
         return ggml_mul(ctx, t, tm); // broadcast over ne0(W), ne2(C), ne3
     };
-    int valid_t0 = (in_valid_frames >= 0) ? in_valid_frames : (T - 1); // before stage 0
+    int valid_t0 = (in_valid_frames >= 0) ? in_valid_frames : offline_entry_valid(T); // before stage 0
     int valid_t1 = (valid_t0 + 3 - 3) / 2 + 1;  // before stage 2 (after stage 0)
     int valid_t2 = (valid_t1 + 3 - 3) / 2 + 1;  // before stage 5 (after stage 2)
 

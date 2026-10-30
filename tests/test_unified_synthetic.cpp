@@ -15,6 +15,7 @@
 #include "mel.hpp"
 #include "mel_gpu.hpp"
 #include "streaming_encoder.hpp"
+#include "subsampling.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -136,6 +137,35 @@ static const int kSizes[] = {0, 1, kHop - 1, kHop, kHop + 1, 5 * kHop, 5 * kHop 
 }  // namespace
 
 int main() {
+    // ---- subsampling valid length: the trimmed mel has no extra trailing frame ----
+    // A unified mel is trimmed to its valid length, so every frame is valid and the
+    // valid output length equals the full output length. A mel of 8k+1 frames
+    // (for example 625, a clip of 100000..100159 samples) used to lose its last
+    // output frame because the entry length was taken as T-1. The gate off keeps
+    // the T-1 convention of the untrimmed offline mel.
+    {
+        ModelLoader on;
+        CHECK(load_spec(Spec{}, "sub_on", on));
+        Subsampling sub_on(on);
+        bool all_equal = true;
+        for (int T = 1; T <= 2000; ++T)
+            if (sub_on.valid_out_len(T) != sub_on.subsample_len(T)) all_equal = false;
+        CHECK(all_equal);
+        CHECK(sub_on.valid_out_len(625) == 79);
+        CHECK(sub_on.valid_out_len(624) == 78);
+        CHECK(sub_on.valid_out_len(626) == 79);
+
+        Spec off_spec;
+        off_spec.valid_length = false;
+        ModelLoader off;
+        CHECK(load_spec(off_spec, "sub_off", off));
+        Subsampling sub_off(off);
+        CHECK(sub_off.valid_out_len(625) == 78);   // T-1 = 624 -> 312 -> 156 -> 78
+        CHECK(sub_off.valid_out_len(626) == 79);
+        CHECK(sub_off.offline_entry_valid(625) == 624);
+        CHECK(sub_on.offline_entry_valid(625) == 625);
+    }
+
     // ---- the gate on: T == floor(S/hop) on the CPU and the GPU frontends ----
     {
         ModelLoader ml;

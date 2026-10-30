@@ -161,9 +161,10 @@ void Encoder::forward_batch(const MelBatch& mels,
     Subsampling sub(ml_);
     int Tp = 0;
     std::vector<int> vout;
-    // Per-item entry valid frames: offline convention is T-1 per clip.
+    // Per-item entry valid frames: T-1 per clip, or T for a mel already trimmed
+    // to its valid length (see Subsampling::offline_entry_valid).
     std::vector<int> vin(mels.B);
-    for (int b = 0; b < mels.B; ++b) vin[b] = mels.valid_T[b] - 1;
+    for (int b = 0; b < mels.B; ++b) vin[b] = sub.offline_entry_valid(mels.valid_T[b]);
 
     std::vector<float> flat; // receives [d_model, Tp, B] (ne0=d_model fastest)
     bool ok = pk::run_graph(/*mem_bytes*/0, /*n_threads*/0,
