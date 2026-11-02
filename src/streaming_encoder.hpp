@@ -1,5 +1,6 @@
 #pragma once
 #include "model_loader.hpp"
+#include <map>
 #include <vector>
 namespace pk {
 
@@ -91,6 +92,10 @@ private:
     std::vector<std::vector<float>> cache_time_;
     // cache_last_channel[layer]: row-major [last_channel_cache, d_model]
     std::vector<std::vector<float>> cache_channel_;
+    // linear_pos(pos_emb) split into heads, [layer] -> [dk, pos_len, H], per window
+    // length Tc + cache_len (see pos_heads()).
+    std::map<int, std::vector<std::vector<float>>> pos_heads_;
+    const std::vector<std::vector<float>>& pos_heads(int window);
 };
 
 } // namespace pk
