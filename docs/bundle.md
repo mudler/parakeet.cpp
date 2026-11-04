@@ -1,10 +1,10 @@
 # Bundle GGUF
 
 A bundle is one GGUF file that holds several single-model GGUF files, so a user
-passes one file instead of several. A bundle can hold five kinds of component:
+passes one file instead of several. A bundle can hold six kinds of component:
 an ASR model (with its own VAD head, if it has one), a VAD model (Silero, or a
-VAD-only slice), speaker diarization, sound-event tagging (ced.cpp) and speaker
-identification (voice-detect.cpp).
+VAD-only slice), speaker diarization, sound-event tagging (ced.cpp), speaker
+identification (voice-detect.cpp) and the audio side of a speech LLM.
 
 A bundle is a packaging format. It does not change how any model runs, and it
 does not convert or re-quantise any weight: each tensor is copied byte for byte
@@ -77,7 +77,7 @@ are required.
 
 | Key | Meaning |
 |---|---|
-| `parakeet.bundle.<c>.kind` | `asr`, `vad`, `diar`, `ced` or `voice` in version 1 (see "Kinds") |
+| `parakeet.bundle.<c>.kind` | `asr`, `vad`, `diar`, `ced`, `voice` or `speechlm_audio` in version 1 (see "Kinds") |
 | `parakeet.bundle.<c>.license` | SPDX identifier, or `LicenseRef-<name>` |
 | `parakeet.bundle.<c>.license_url` | `http(s)` URL of the licence text |
 | `parakeet.bundle.<c>.source` | Upstream model id or URL |
@@ -119,6 +119,7 @@ worth knowing:
   already has the head), and `--vad-component` that names a slice is an error.
 
 | `diar` | A Nemotron diarization GGUF (`parakeet.arch` `diarization`) | `DiarizationModel::load(path, name)`, through the same prefixed loader as `asr` |
+| `speechlm_audio` | The audio side of a speech LLM (`parakeet.arch` `speechlm_audio`, [speechlm-audio.md](speechlm-audio.md)). It needs a `diar` component beside it | `SpeechLmAudio::load(path, name, path, diar_name)`, `parakeet_capi_load_speechlm_audio` |
 | `ced` | A ced.cpp GGUF (`general.architecture` `ced`, CED-tiny, -mini, -small or -base) | `CedTagger::load(path, name)`, from a read-only map of the bundle (see "ced and voice components") |
 | `voice` | A voice-detect.cpp speaker encoder GGUF (`general.architecture` `voicedetect` with an embedding: WeSpeaker ResNet34, ECAPA, ERes2Net, CAM++) | `SpeakerEncoder::load(path, name)`, from a read-only map of the bundle |
 

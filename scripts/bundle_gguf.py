@@ -25,7 +25,8 @@ Inspect and verify:
   bundle_gguf.py --notice bundle.gguf     # credits plus the full licence texts to ship
 
 Kinds: asr (parakeet ASR), vad (Silero, or a VAD-only slice), diar (Nemotron
-diarization), ced (ced.cpp sound events), voice (voice-detect.cpp speaker encoder).
+diarization), ced (ced.cpp sound events), voice (voice-detect.cpp speaker encoder),
+speechlm_audio (audio side of a speech LLM, arch speechlm_audio; load it with a diar component).
 
 The output is deterministic: the same inputs and manifest give the same bytes.
 The script refuses a component without full licence metadata, a licence that
@@ -43,7 +44,7 @@ from gguf import GGUFReader, GGUFValueType, GGUFWriter
 
 ARCH = "parakeet-bundle"
 VERSION = 1
-KINDS = ("asr", "vad", "diar", "ced", "voice")   # kinds this tool can build (see docs/bundle.md)
+KINDS = ("asr", "vad", "diar", "ced", "voice", "speechlm_audio")   # kinds this tool can build (see docs/bundle.md)
 LICENSE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bundle_licenses")
 RESERVED_NAMES = {"general", "parakeet", "bundle"}
 NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -228,6 +229,8 @@ def check_input(name, kind, reader, meta):
             raise BundleError(f"component {name}: input is a VAD-only slice, not an ASR model; use kind vad")
         if str_field(reader, "parakeet.arch") == "diarization":
             raise BundleError(f"component {name}: input is a diarization model, not ASR; use kind diar")
+        if str_field(reader, "parakeet.arch") == "speechlm_audio":
+            raise BundleError(f"component {name}: input is a speech LLM audio model, not ASR; use kind speechlm_audio")
         for k in ("parakeet.encoder.d_model", "parakeet.vocab_size"):
             if k not in reader.fields:
                 raise BundleError(f"component {name}: input lacks the key {k}")
@@ -236,6 +239,13 @@ def check_input(name, kind, reader, meta):
             raise BundleError(f"component {name}: kind diar needs a Nemotron diarization GGUF "
                               f"(parakeet.arch 'diarization'; general.architecture is '{arch}')")
         for k in ("parakeet.diar.n_speakers", "parakeet.encoder.d_model"):
+            if k not in reader.fields:
+                raise BundleError(f"component {name}: input lacks the key {k}")
+    elif kind == "speechlm_audio":
+        if arch != "parakeet" or str_field(reader, "parakeet.arch") != "speechlm_audio":
+            raise BundleError(f"component {name}: kind speechlm_audio needs a speech LLM audio GGUF "
+                              f"(parakeet.arch 'speechlm_audio'; general.architecture is '{arch}')")
+        for k in ("parakeet.speechlm.present", "parakeet.speechlm.llm_dim", "parakeet.encoder.d_model"):
             if k not in reader.fields:
                 raise BundleError(f"component {name}: input lacks the key {k}")
     elif kind == "ced":
