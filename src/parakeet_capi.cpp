@@ -2,6 +2,7 @@
 #include "parakeet.h"     // pk::Decoder
 #include "model.hpp"      // pk::Model
 #include "diarization.hpp" // pk::DiarizationModel
+#include "speechlm_audio.hpp" // pk::SpeechLmAudio
 #include "diarization_streaming.hpp" // pk::StreamingDiarization
 #include "streaming.hpp"  // pk::StreamingSession
 #include "buffered_streaming.hpp" // pk::BufferedStreamingSession (unified checkpoints)
@@ -108,6 +109,7 @@ struct parakeet_ctx {
     std::unique_ptr<pk::CedTagger> tagger;
     std::unique_ptr<pk::SpeakerEncoder> speaker;
     std::unique_ptr<pk::SileroVad> silero;   // Silero VAD model (architecture "silero_vad")
+    std::unique_ptr<pk::SpeechLmAudio> speechlm;   // audio side of a speech LLM (audio + diarization models)
     std::string speaker_identity;
     std::string speaker_warning;   // latest registry/encoder check warning
     ErrorSlot last_error;
@@ -248,7 +250,8 @@ char* dup_to_c(const std::string& s) {
 namespace {
 // Why a call that needs an ASR or diarization model found none.
 const char* no_model_msg(const parakeet_ctx* c) {
-    return c->vad_model ? "context holds a VAD-only model: only parakeet_capi_vad_* calls work with it"
+    return c->speechlm  ? "context holds a speech LLM audio model: only parakeet_capi_audio_* calls work with it"
+         : c->vad_model ? "context holds a VAD-only model: only parakeet_capi_vad_* calls work with it"
                         : "context has no loaded model";
 }
 }  // namespace
@@ -313,6 +316,10 @@ parakeet_ctx* load_bundle_component(const char* path, const std::string& name) {
     } else if (c->kind == pk::kBundleKindVad) {
         ctx->silero = pk::SileroVad::load(path, &err, name);
         if (!ctx->silero) { g_load_error = err; return nullptr; }
+    } else if (c->kind == pk::kBundleKindSpeechLmAudio) {
+        g_load_error = "component \"" + name + "\" is the audio side of a speech LLM; open it with "
+                       "parakeet_capi_load_speechlm_audio together with a diarization component";
+        return nullptr;
     } else {
         g_load_error = "component \"" + name + "\" has kind \"" + c->kind + "\", which this build cannot load";
         return nullptr;
@@ -2296,6 +2303,7 @@ extern "C" int parakeet_capi_model_kind(const parakeet_ctx* ctx) {
     if (ctx->tagger) return PARAKEET_MODEL_KIND_SOUND;
     if (ctx->speaker) return PARAKEET_MODEL_KIND_SPEAKER;
     if (ctx->silero) return PARAKEET_MODEL_KIND_VAD;
+    if (ctx->speechlm) return PARAKEET_MODEL_KIND_SPEECHLM_AUDIO;
     return PARAKEET_MODEL_KIND_NONE;
 }
 
@@ -2842,4 +2850,107 @@ extern "C" char* parakeet_capi_diarize_profiles_pcm_json(parakeet_ctx* diar, par
     parakeet_speaker_registry* reg, const float* samples, int n_samples, int sample_rate,
     float accept_threshold, float margin) {
     return diarize_named_pcm_json(true, diar, speaker, reg, samples, n_samples, sample_rate, accept_threshold, margin);
+}
+
+// ---------------------------------------------------------------------------
+// Speech LLM audio embeddings
+// ---------------------------------------------------------------------------
+
+extern "C" parakeet_ctx* parakeet_capi_load_speechlm_audio(const char* audio_path, const char* audio_component,
+                                                           const char* diar_path, const char* diar_component) {
+    g_load_error.clear();
+    if (!audio_path || !*audio_path) { g_load_error = "audio_path is NULL"; return nullptr; }
+    if (!diar_path || !*diar_path) { g_load_error = "diar_path is NULL"; return nullptr; }
+    try {
+        std::unique_ptr<parakeet_ctx> ctx(new (std::nothrow) parakeet_ctx());
+        if (!ctx) { g_load_error = "out of memory"; return nullptr; }
+        std::string err;
+        ctx->speechlm = pk::SpeechLmAudio::load(audio_path, audio_component ? audio_component : "",
+                                                diar_path, diar_component ? diar_component : "", &err);
+        if (!ctx->speechlm) { g_load_error = err.empty() ? "cannot load the speech LLM audio model" : err; return nullptr; }
+        return ctx.release();
+    } catch (const std::exception& e) {
+        g_load_error = e.what();
+    } catch (...) {
+        g_load_error = "unknown error";
+    }
+    return nullptr;
+}
+
+extern "C" int parakeet_capi_audio_embed_dim(const parakeet_ctx* ctx) {
+    return (ctx && ctx->speechlm) ? ctx->speechlm->dim() : -1;
+}
+
+namespace {
+
+// Embeds 16 kHz mono PCM and hands the rows to the caller as a malloc'd array.
+int audio_embed_16k(parakeet_ctx* ctx, const std::vector<float>& pcm16k, float** out, int* n_tokens, int* dim) {
+    std::vector<float> rows;
+    int n = 0;
+    ctx->speechlm->embed_pcm(pcm16k, rows, n);
+    *n_tokens = n;
+    *dim = ctx->speechlm->dim();
+    if (n > 0) {
+        float* p = static_cast<float*>(std::malloc(rows.size() * sizeof(float)));
+        if (!p) { ctx->last_error = "out of memory"; *n_tokens = 0; *dim = 0; return 1; }
+        std::memcpy(p, rows.data(), rows.size() * sizeof(float));
+        *out = p;
+    }
+    ctx->last_error.clear();
+    return 0;
+}
+
+bool require_speechlm(parakeet_ctx* ctx) {
+    if (ctx->speechlm) return true;
+    ctx->last_error = "context holds no speech LLM audio model (load one with parakeet_capi_load_speechlm_audio)";
+    return false;
+}
+
+}  // namespace
+
+extern "C" int parakeet_capi_audio_embed_pcm(parakeet_ctx* ctx, const float* samples, int n_samples,
+                                             int sample_rate, float** out_embeddings, int* out_n_tokens,
+                                             int* out_dim) {
+    if (out_embeddings) *out_embeddings = nullptr;
+    if (out_n_tokens) *out_n_tokens = 0;
+    if (out_dim) *out_dim = 0;
+    if (!ctx) return 1;
+    if (!out_embeddings || !out_n_tokens || !out_dim) { ctx->last_error = "an output pointer is NULL"; return 1; }
+    try {
+        if (!require_speechlm(ctx)) return 1;
+        if (!samples || n_samples <= 0) { ctx->last_error = "no audio"; return 1; }
+        if (sample_rate <= 0) { ctx->last_error = "invalid sample rate"; return 1; }
+        std::vector<float> pcm(samples, samples + n_samples);
+        if (sample_rate != 16000) pcm = pk::resample_linear(pcm, sample_rate, 16000);
+        return audio_embed_16k(ctx, pcm, out_embeddings, out_n_tokens, out_dim);
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+    } catch (...) {
+        ctx->last_error = "unknown error";
+    }
+    return 1;
+}
+
+extern "C" int parakeet_capi_audio_embed_path(parakeet_ctx* ctx, const char* audio_path, float** out_embeddings,
+                                              int* out_n_tokens, int* out_dim) {
+    if (out_embeddings) *out_embeddings = nullptr;
+    if (out_n_tokens) *out_n_tokens = 0;
+    if (out_dim) *out_dim = 0;
+    if (!ctx) return 1;
+    if (!out_embeddings || !out_n_tokens || !out_dim) { ctx->last_error = "an output pointer is NULL"; return 1; }
+    try {
+        if (!require_speechlm(ctx)) return 1;
+        if (!audio_path || !*audio_path) { ctx->last_error = "audio_path is NULL"; return 1; }
+        pk::Audio audio;
+        if (!pk::load_audio_16k_mono(audio_path, audio)) {
+            ctx->last_error = std::string("failed to load audio: ") + audio_path;
+            return 1;
+        }
+        return audio_embed_16k(ctx, audio.samples, out_embeddings, out_n_tokens, out_dim);
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+    } catch (...) {
+        ctx->last_error = "unknown error";
+    }
+    return 1;
 }

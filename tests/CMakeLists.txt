@@ -113,6 +113,7 @@ pk_add_test(test_capi_ctc_logits)
 pk_add_test(test_capi_vad)
 pk_add_test(test_diarization)
 pk_add_test(test_speechlm_audio)
+pk_add_test(test_capi_speechlm_audio)  # argument checks run everywhere; the model part needs the GGUFs
 pk_add_test(test_encoder_gates)  # CPU-only, no checkpoint: runs everywhere
 pk_add_test(test_diarization_accuracy)
 pk_add_test(test_sas_merge)
@@ -238,7 +239,7 @@ set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_bat
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou test_transcribe_nemotron
                      test_streaming_decode test_streaming_eou_reset test_streaming_nemotron test_streaming_mel test_capi test_capi_batch test_capi_concurrency test_pool_stress test_pool_shutdown test_capi_stream test_capi_stream_json
                      test_capi_timestamps test_capi_batch_json test_capi_ctc_logits
-                     test_combined_offline test_streaming_diarization test_diarization_accuracy test_speechlm_audio test_ternary_model test_ternary_long test_fivevalue_model test_fivevalue_gpu test_transcribe_vad test_vad_batched test_decoder_reuse test_capi_vad
+                     test_combined_offline test_streaming_diarization test_diarization_accuracy test_speechlm_audio test_capi_speechlm_audio test_ternary_model test_ternary_long test_fivevalue_model test_fivevalue_gpu test_transcribe_vad test_vad_batched test_decoder_reuse test_capi_vad
                      PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # ctest runs the stress test in its short form (it is heavy on a loaded machine
