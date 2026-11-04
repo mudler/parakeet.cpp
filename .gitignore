@@ -8,6 +8,10 @@ __pycache__/
 *.pyc
 /.cache/
 
+# OS metadata
+.DS_Store
+Thumbs.db
+
 # Benchmark large/derived files (audio + model weights) — NOT committed
 benchmarks/audio/
 benchmarks/models/
