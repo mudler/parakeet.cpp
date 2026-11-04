@@ -87,9 +87,21 @@ void MelKernel::frame_logmel(const double* frame_in, float* out_col, int out_str
     // ----- power spectrum -----
     // NeMo: x = sqrt(re^2 + im^2) (guard=0 at inference), then x = x^mag_power.
     power.resize((size_t)n_bins_);
-    for (int b = 0; b < n_bins_; ++b) {
-        const double mag = std::sqrt((double)re[b] * re[b] + (double)im[b] * im[b]);
-        power[b] = (mag_power_ == 1.0f) ? mag : std::pow(mag, (double)mag_power_);
+    if (mag_power_ == 1.0f) {
+        for (int b = 0; b < n_bins_; ++b) {
+            power[b] = std::sqrt((double)re[b] * re[b] + (double)im[b] * im[b]);
+        }
+    } else if (mag_power_ == 2.0f) {
+        // Bolt optimization: mag_power == 2.0 avoids sqrt(re^2 + im^2)^2 -> re^2 + im^2 directly.
+        for (int b = 0; b < n_bins_; ++b) {
+            power[b] = (double)re[b] * re[b] + (double)im[b] * im[b];
+        }
+    } else {
+        const double mp = (double)mag_power_;
+        for (int b = 0; b < n_bins_; ++b) {
+            const double mag = std::sqrt((double)re[b] * re[b] + (double)im[b] * im[b]);
+            power[b] = std::pow(mag, mp);
+        }
     }
 
     // ----- mel projection + log(mel + guard) -----
@@ -130,17 +142,6 @@ void MelFrontend::compute(const std::vector<float>& samples,
     const int n_fft_ = k_.n_fft_, hop_ = k_.hop_, n_mels_ = k_.n_mels_;
     const float preemph_ = k_.preemph_;
 
-    // ----- Step 2: Preemphasis -----
-    // NeMo: x = cat((x[:,0], x[:,1:] - preemph * x[:,:-1])); first sample unchanged.
-    std::vector<double> x((size_t)S);
-    if (preemph_ > 0.0f && S > 0) {
-        x[0] = samples[0];
-        for (int t = 1; t < S; ++t)
-            x[t] = (double)samples[t] - (double)preemph_ * (double)samples[t - 1];
-    } else {
-        for (int t = 0; t < S; ++t) x[t] = samples[t];
-    }
-
     // seq_len = floor(S / hop) (NeMo get_seq_len for center=True:
     //   floor((S + n_fft//2*2 - n_fft) / hop) = floor(S / hop)).
     const int seq_len = (S > 0) ? (S / hop_) : 0;
@@ -154,11 +155,19 @@ void MelFrontend::compute(const std::vector<float>& samples,
     T = n_frames;
     n_mels = n_mels_;
 
-    // Zero-padded signal. NeMo's stft uses pad_mode="constant" (features.py),
-    // so center=True pads n_fft//2 ZEROS on each side (not reflection).
-    // The original signal sits at [pad, pad+S); everything else is 0.
+    // Bolt optimization: Zero-padded signal. Fuse preemphasis directly into padded,
+    // eliminating intermediate vector allocation 'x' and saving a pass over memory.
     std::vector<double> padded((size_t)padded_len, 0.0);
-    for (int j = 0; j < S; ++j) padded[pad + j] = x[j];
+    if (S > 0) {
+        padded[pad] = samples[0];
+        if (preemph_ > 0.0f) {
+            for (int t = 1; t < S; ++t)
+                padded[pad + t] = (double)samples[t] - (double)preemph_ * (double)samples[t - 1];
+        } else {
+            for (int t = 1; t < S; ++t)
+                padded[pad + t] = samples[t];
+        }
+    }
 
     // Power spectrum per frame: power[b][t] = (re^2 + im^2) (mag then ^mag_power).
     // We store frame-major scratch; mel is computed directly into feats.

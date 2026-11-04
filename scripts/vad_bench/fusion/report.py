@@ -105,5 +105,7 @@ for h in HEADS:
     P_(f"LR coefficients ({h}, fit on folds != 0; features lg(silero), lg(head)[, lg(silero prev/next), lg(head prev/next)]):")
     for kind in("lr2","lr6","lr6nz"): P_(f"- {kind}: {LR[(h,kind,'f0')][1]}")
     P_()
-open("results.md","w").write("\n".join(out)); pickle.dump({h:{n:v[0] for n,v in S.items()} for h,S in ALL.items()},open("rows.pkl","wb"))
+open("results.md","w").write("\n".join(out))
+rows_json = {h: {n: v[0].tolist() for n, v in S.items()} for h, S in ALL.items()}
+json.dump(rows_json, open("rows.json", "w"))
 print("\n".join(out)[:200])

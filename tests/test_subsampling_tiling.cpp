@@ -72,5 +72,53 @@ int main(){
         std::printf("forward_tiled worst per-frame rel=%.3e\n", worstrel);
         if (worstrel > 1e-2){ std::fprintf(stderr,"forward_tiled parity FAIL rel=%.3e maxabs=%.3e\n", worstrel, maxabs); return 1; }
     }
+
+    // ---- Causal model tiling check (if PARAKEET_TEST_GGUF_NEMOTRON is provided) ----
+    if (const char* causal_gguf = std::getenv("PARAKEET_TEST_GGUF_NEMOTRON")) {
+        pk::ModelLoader ml_causal;
+        if (ml_causal.load(causal_gguf) && ml_causal.config().causal_downsampling) {
+            pk::Subsampling sub_causal(ml_causal);
+            const int n_mels = (int)ml_causal.config().n_mels;
+            const int T = 4000;
+            std::vector<float> mel((size_t)n_mels * T);
+            unsigned s2 = 7654321u;
+            for (size_t i = 0; i < mel.size(); ++i) {
+                s2 = s2 * 1103515245u + 12345u;
+                mel[i] = ((s2 >> 9) & 0xFFFF) / 32768.0f - 1.0f;
+            }
+            std::vector<float> full; int Tp = 0, dm = 0, vl = 0;
+            sub_causal.forward(mel, n_mels, T, full, Tp, dm, vl);
+
+            std::vector<float> tiled; int Tp2 = 0, dm2 = 0, vl2 = 0;
+            sub_causal.forward_tiled(mel, n_mels, T, /*tile_out_frames*/17, tiled, Tp2, dm2, vl2);
+
+            if (Tp2 != Tp || dm2 != dm || vl2 != vl) {
+                std::fprintf(stderr, "causal tiled shape/valid mismatch Tp=%d/%d dm=%d/%d vl=%d/%d\n",
+                             Tp, Tp2, dm, dm2, vl, vl2);
+                return 1;
+            }
+
+            double maxabs = 0, worstrel = 0;
+            for (int t = 0; t < vl; ++t) {
+                double dmax = 0, fmax = 0;
+                for (int c = 0; c < dm; ++c) {
+                    double ref = full[(size_t)t * dm + c];
+                    double d = std::fabs((double)tiled[(size_t)t * dm + c] - ref);
+                    if (d > maxabs) maxabs = d;
+                    if (d > dmax) dmax = d;
+                    if (std::fabs(ref) > fmax) fmax = std::fabs(ref);
+                }
+                double rel = dmax / (fmax + 1e-6);
+                if (rel > worstrel) worstrel = rel;
+            }
+            std::printf("causal forward_tiled maxabs=%.3e (vl=%d dm=%d)\n", maxabs, vl, dm);
+            std::printf("causal forward_tiled worst per-frame rel=%.3e\n", worstrel);
+            if (worstrel > 1e-2) {
+                std::fprintf(stderr, "causal forward_tiled parity FAIL rel=%.3e maxabs=%.3e\n", worstrel, maxabs);
+                return 1;
+            }
+        }
+    }
+
     return 0;
 }

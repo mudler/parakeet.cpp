@@ -1,6 +1,9 @@
-import pickle,json,sys,numpy as np
+import json,sys,numpy as np
 from fl import prf
-R=pickle.load(open("results.pkl","rb")); CFG=R["cfg"]; LR=R["lr"]; M=R["meta"]
+R=json.load(open("results.json","r"))
+CFG={(item["rule"],tuple(item["p"]),item["h"],item["ms"]):np.array(item["arr"]) for item in R["cfg"]}
+LR={(item["h"],item["kind"],item["split"]):(np.array(item["out"]),item["coef"]) for item in R["lr"]}
+M=R["meta"]
 N=len(M["names"]); fold=np.array(M["fold"]); noz=np.array(M["noise_only"]); snr=np.array(M["snr_true"]); dur=np.array(M["dur"])
 sp=~noz
 LEVELS=[("clean",99),("20 dB",20),("10 dB",10),("5 dB",5),("0 dB",0)]

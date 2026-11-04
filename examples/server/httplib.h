@@ -1473,6 +1473,7 @@ protected:
   };
 
   virtual bool create_and_connect_socket(Socket &socket, Error &error);
+  virtual bool initialize_ssl(Socket &socket, Response &res, Error &error);
 
   // All of:
   //   shutdown_ssl
@@ -1977,6 +1978,7 @@ private:
   bool connect_with_proxy(Socket &sock, Response &res, bool &success,
                           Error &error);
   bool initialize_ssl(Socket &socket, Error &error);
+  bool initialize_ssl(Socket &socket, Response &res, Error &error) override;
 
   bool load_certs();
 
@@ -3874,6 +3876,62 @@ inline bool can_compress_content_type(const std::string &content_type) {
   }
 }
 
+inline bool has_accept_encoding(const std::string &s,
+                                const std::string &encoding) {
+  size_t start = 0;
+  while (start < s.size()) {
+    auto comma_pos = s.find(',', start);
+    if (comma_pos == std::string::npos) {
+      comma_pos = s.size();
+    }
+    auto item = s.substr(start, comma_pos - start);
+    start = comma_pos + 1;
+
+    auto item_trimmed = detail::trim_copy(item);
+    if (item_trimmed.empty()) { continue; }
+
+    auto semi_pos = item_trimmed.find(';');
+    std::string coding =
+        (semi_pos == std::string::npos)
+            ? item_trimmed
+            : detail::trim_copy(item_trimmed.substr(0, semi_pos));
+
+    if (detail::case_ignore::equal(coding, encoding)) {
+      if (semi_pos != std::string::npos) {
+        auto params_str = item_trimmed.substr(semi_pos + 1);
+        size_t p_start = 0;
+        bool q_found = false;
+        double qval = 1.0;
+        while (p_start < params_str.size()) {
+          auto p_semi = params_str.find(';', p_start);
+          if (p_semi == std::string::npos) { p_semi = params_str.size(); }
+          auto param =
+              detail::trim_copy(params_str.substr(p_start, p_semi - p_start));
+          p_start = p_semi + 1;
+
+          auto eq_pos = param.find('=');
+          if (eq_pos != std::string::npos) {
+            auto key = detail::trim_copy(param.substr(0, eq_pos));
+            if (detail::case_ignore::equal(key, "q")) {
+              auto val_str = detail::trim_copy(param.substr(eq_pos + 1));
+              char *endptr = nullptr;
+              qval = std::strtod(val_str.c_str(), &endptr);
+              if (endptr != val_str.c_str()) {
+                q_found = true;
+              } else {
+                qval = 1.0;
+              }
+            }
+          }
+        }
+        if (q_found && qval == 0.0) { continue; }
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 inline EncodingType encoding_type(const Request &req, const Response &res) {
   auto ret =
       detail::can_compress_content_type(res.get_header_value("Content-Type"));
@@ -3883,15 +3941,11 @@ inline EncodingType encoding_type(const Request &req, const Response &res) {
   (void)(s);
 
 #ifdef CPPHTTPLIB_BROTLI_SUPPORT
-  // TODO: 'Accept-Encoding' has br, not br;q=0
-  ret = s.find("br") != std::string::npos;
-  if (ret) { return EncodingType::Brotli; }
+  if (has_accept_encoding(s, "br")) { return EncodingType::Brotli; }
 #endif
 
 #ifdef CPPHTTPLIB_ZLIB_SUPPORT
-  // TODO: 'Accept-Encoding' has gzip, not gzip;q=0
-  ret = s.find("gzip") != std::string::npos;
-  if (ret) { return EncodingType::Gzip; }
+  if (has_accept_encoding(s, "gzip")) { return EncodingType::Gzip; }
 #endif
 
   return EncodingType::None;
@@ -5297,7 +5351,10 @@ inline bool expect_content(const Request &req) {
       req.method == "PRI" || req.method == "DELETE") {
     return true;
   }
-  // TODO: check if Content-Length is set
+  if (req.has_header("Content-Length") ||
+      is_chunked_transfer_encoding(req.headers)) {
+    return true;
+  }
   return false;
 }
 
@@ -7338,6 +7395,11 @@ inline bool ClientImpl::create_and_connect_socket(Socket &socket,
   return true;
 }
 
+inline bool ClientImpl::initialize_ssl(Socket & /*socket*/, Response & /*res*/,
+                                       Error & /*error*/) {
+  return true;
+}
+
 inline void ClientImpl::shutdown_ssl(Socket & /*socket*/,
                                      bool /*shutdown_gracefully*/) {
   // If there are any requests in flight from threads other than us, then it's
@@ -7459,20 +7521,7 @@ inline bool ClientImpl::send_(Request &req, Response &res, Error &error) {
     if (!is_alive) {
       if (!create_and_connect_socket(socket_, error)) { return false; }
 
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-      // TODO: refactoring
-      if (is_ssl()) {
-        auto &scli = static_cast<SSLClient &>(*this);
-        if (!proxy_host_.empty() && proxy_port_ != -1) {
-          auto success = false;
-          if (!scli.connect_with_proxy(socket_, res, success, error)) {
-            return success;
-          }
-        }
-
-        if (!scli.initialize_ssl(socket_, error)) { return false; }
-      }
-#endif
+      if (!initialize_ssl(socket_, res, error)) { return false; }
     }
 
     // Mark the current socket as being in use so that it cannot be closed by
@@ -9317,6 +9366,20 @@ inline SSL_CTX *SSLClient::ssl_context() const { return ctx_; }
 
 inline bool SSLClient::create_and_connect_socket(Socket &socket, Error &error) {
   return is_valid() && ClientImpl::create_and_connect_socket(socket, error);
+}
+
+inline bool SSLClient::initialize_ssl(Socket &socket, Response &res,
+                                      Error &error) {
+  if (!proxy_host_.empty() && proxy_port_ != -1) {
+    auto success = false;
+    if (!connect_with_proxy(socket, res, success, error)) {
+      return success;
+    }
+  }
+
+  if (!initialize_ssl(socket, error)) { return false; }
+
+  return true;
 }
 
 // Assumes that socket_mutex_ is locked and that there are no requests in flight

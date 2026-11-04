@@ -63,8 +63,7 @@ public:
 
     // Tiled subsampling for long audio: result is identical to forward() within the
     // valid region, but no intermediate tensor exceeds a tile_out_frames-bounded size.
-    // tile_out_frames = number of OUTPUT (subsampled) frames per tile. Non-causal only;
-    // causal falls back to the single-graph path.
+    // tile_out_frames = number of OUTPUT (subsampled) frames per tile.
     void forward_tiled(const std::vector<float>& mel, int n_mels, int T,
                        int tile_out_frames, std::vector<float>& out,
                        int& Tout, int& d_model, int& valid_len) const;

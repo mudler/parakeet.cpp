@@ -2,7 +2,13 @@ import os
 FUSION=os.environ.get('FUSION_DIR','../fusion')  # scripts/vad_bench/fusion with data/ built by prep_libri.py
 """Rebuild the fusion synthetic set (same generators and seeds as fusion/mkcorpus.py + mkgap.py) and compute per-clip:
 head logits (redux, ultra F16; CPU reference validated against parakeet-cli), Silero probabilities (ONNX), and 10 ms frame energy."""
-import numpy as np,json,pickle,sys,os
+import numpy as np,json,sys,os
+
+class ClipEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 from vadlib import *; import corpus; import onnxruntime as ort
 FL=corpus.FL; libri=corpus.libri; spk=corpus.spk
 sets=corpus.speech_sets()
@@ -38,4 +44,4 @@ for i,c in enumerate(clips):
     fr=len(y)//160; c['e10']=10*np.log10((y[:fr*160].reshape(fr,160).astype(np.float64)**2).mean(1)+1e-12)   # dBFS^2 per 10 ms
     del c['y']
     if i%40==0: print(i,flush=True)
-pickle.dump(clips,open('e_set.pkl','wb'))
+json.dump(clips,open('e_set.json','w'),cls=ClipEncoder)

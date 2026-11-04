@@ -1,5 +1,6 @@
 #include "diarization_streaming.hpp"
 #include "backend.hpp"
+#include "common.hpp"
 #include "ggml.h"
 #include "ggml-backend.h"
 
@@ -124,8 +125,14 @@ void StreamingDiarization::reset() {
 
 std::vector<StreamingSpeakerSegment> StreamingDiarization::feed_mel(
         const std::vector<float>& mel, int n_mels, int n_frames, bool is_last) {
-    if (n_mels != n_mels_ || n_frames < 0 || mel.size() != (size_t)n_mels * n_frames)
-        throw std::runtime_error("parakeet: bad streaming diarization mel shape");
+    if (n_mels != n_mels_ || n_frames < 0 || mel.size() != (size_t)n_mels * n_frames) {
+        std::string err = "parakeet: bad streaming diarization mel shape (expected n_mels=" +
+                          std::to_string(n_mels_) + ", got n_mels=" + std::to_string(n_mels) +
+                          ", n_frames=" + std::to_string(n_frames) +
+                          ", mel.size=" + std::to_string(mel.size()) + ")";
+        PK_LOG("%s", err.c_str());
+        throw std::runtime_error(err);
+    }
 
     // Buffer frame-major.
     const size_t base = buf_.size();
