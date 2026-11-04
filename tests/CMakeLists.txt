@@ -112,6 +112,7 @@ pk_add_test(test_capi_batch_json)
 pk_add_test(test_capi_ctc_logits)
 pk_add_test(test_capi_vad)
 pk_add_test(test_diarization)
+pk_add_test(test_encoder_gates)  # CPU-only, no checkpoint: runs everywhere
 pk_add_test(test_diarization_accuracy)
 pk_add_test(test_sas_merge)
 pk_add_test(test_asr_committer)

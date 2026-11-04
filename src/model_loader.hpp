@@ -81,6 +81,19 @@ struct VadCfg {
     uint32_t kernel = 0;
     float frame_sec = 0.08f;     // seconds per head output frame
 };
+// Audio side of a speech LLM (arch "speechlm_audio", e.g. Nemotron 3.5 Transcribe):
+// the ASR transformer encoder runs in chunks, a diarization model supplies
+// per-frame speaker activity, the two are fused and an adapter projects the
+// result into the LLM embedding space. present=false for every other model.
+struct SpeechLmCfg {
+    bool present = false;
+    uint32_t llm_dim = 0;               // adapter output width (LLM hidden size)
+    uint32_t num_speakers = 0;          // speaker slots of the fusion table
+    float activity_threshold = 0.5f;    // p(speaker) above this counts as active
+    int32_t chunk_len = 500;            // encoder frames per chunk
+    int32_t chunk_left_context = 50;    // context frames before a chunk
+    int32_t chunk_right_context = 50;   // context frames after a chunk
+};
 struct ParakeetConfig {
     std::string arch;
     // encoder
@@ -146,6 +159,14 @@ struct ParakeetConfig {
     bool pre_block_norm=true;        // embed_norm before blocks (true)
     float rope_base=10000.0f;        // RoPE theta
     float rotary_fraction=1.0f;      // fraction of head_dim rotated
+    // Per-head LayerNorm on q and k before RoPE (parakeet.encoder.qk_norm). Off for
+    // every existing model.
+    bool qk_norm=false;
+    // FFN activation of the transformer encoder (parakeet.encoder.activation):
+    // "gelu" is ggml's tanh approximation (the existing diarization models),
+    // "gelu_erf" the exact erf form.
+    std::string activation="gelu";
+    SpeechLmCfg speechlm;
 };
 class ModelLoader {
 public:
