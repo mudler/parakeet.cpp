@@ -40,6 +40,14 @@ def run(*args):
     return p.returncode, p.stdout + p.stderr
 
 
+def load_in_cpp(loader, gguf_path, work):
+    if not loader or not os.path.exists(loader):
+        return
+    env = dict(os.environ, PARAKEET_TEST_LLM_GGUF=gguf_path)
+    p = subprocess.run([loader], capture_output=True, text=True, env=env, cwd=work)
+    check(p.returncode == 0, f"C++ loader rejects {os.path.basename(gguf_path)}: {p.stdout}{p.stderr}")
+
+
 def tensors_of(path):
     r = gguf.GGUFReader(path)
     return r, {t.name: t for t in r.tensors}
@@ -118,6 +126,9 @@ def main():
 
         rc, log = run(VERIFY, "--gguf", out, "--safetensors", st)
         check(rc == 0 and "OK" in log, "verifier rejects a good GGUF: " + log)
+        loader = os.environ.get("PARAKEET_TEST_LLM_LOADER")  # set by ctest: the C++ loader reads our files
+
+        load_in_cpp(loader, out, work)
 
         # F16 and Q8_0: linears change type, small tensors stay F32, experts follow --expert-dtype
         for dt, ty in (("f16", "F16"), ("q8_0", "Q8_0")):
@@ -141,6 +152,7 @@ def main():
             check(np.abs(got - ref).max() < 0.02, f"{dt}: expert values off by {np.abs(got - ref).max()}")
             rc, log = run(VERIFY, "--gguf", o, "--safetensors", st)
             check(rc == 0, f"verifier rejects the {dt} GGUF: " + log)
+            load_in_cpp(loader, o, work)
         o = os.path.join(work, "mixed.gguf")
         rc, log = run(CONVERT, "--safetensors", st, "--config", cfg, "--output", o, "--dtype", "f16", "--expert-dtype", "q8_0")
         _, t3 = tensors_of(o)
