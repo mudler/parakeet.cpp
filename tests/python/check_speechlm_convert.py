@@ -4,8 +4,8 @@
 Builds a tiny safetensors file with the checkpoint's `perception.*` tensor names (one-layer
 encoders, BF16), converts it, and checks the two GGUF files: architecture and keys the loader
 reads, tensor names and shapes, the BF16 -> F32 conversion, the fused QKV passed through, and
-that the unused speaker head and the LLM tensors are left out. Exit 0 on success, 77 when the
-gguf package is missing.
+that the unused speaker head and the LLM tensors are left out. Exit 0 on success, 77 when numpy or
+the gguf package is missing.
 """
 import json
 import os
@@ -13,14 +13,13 @@ import struct
 import sys
 import tempfile
 
-import numpy as np
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
 try:
+    import numpy as np  # noqa: E402
     import gguf  # noqa: E402
 except ImportError:
-    print("gguf not installed; skipping")
+    print("skip: numpy and gguf are needed")
     sys.exit(77)
 import convert_nemotron_speechlm_audio as conv  # noqa: E402
 
