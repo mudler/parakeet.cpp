@@ -104,7 +104,7 @@ python3 scripts/gen_unicode_tables.py --ucd-dir /path/to/ucd16 --fetch > src/uni
 The script reads `extracted/DerivedGeneralCategory.txt` and `PropList.txt` of
 Unicode 16.0.0 and stops if the files are of another version. When a newer
 `tokenizers` release moves to a newer Unicode version, bump `VERSION` in the
-script and rerun the code point comparison (see below).
+script and compare every code point against the new release again (the pre-tokenizer spans of `BpeTokenizer::pre_tokenize` against `Tokenizer.pre_tokenizer.pre_tokenize_str`).
 
 ## Tests
 
