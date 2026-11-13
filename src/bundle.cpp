@@ -67,7 +67,7 @@ const BundleComponent* BundleInfo::find(const std::string& n) const {
 
 bool bundle_kind_known(const std::string& k) {
     return k == kBundleKindAsr || k == kBundleKindVad || k == kBundleKindDiar || k == kBundleKindCed ||
-           k == kBundleKindVoice;
+           k == kBundleKindVoice || k == kBundleKindSpeechLmAudio;
 }
 
 bool gguf_is_bundle(const std::string& path) {

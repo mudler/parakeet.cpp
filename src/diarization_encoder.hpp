@@ -14,9 +14,11 @@ namespace pk {
 //   - FeatureStacking subsampling (8x stack of mel frames -> Linear, no bias)
 //   - embed_norm LayerNorm (pre_block_norm)
 //   - N x TransformerBlock (pre-norm): x = x + attn(norm1(x)); x = x + ffn(norm2(x))
-//   - attention: fused QKV (optional bias) -> RoPE (GPT-NeoX) -> softmax attention
+//   - attention: fused QKV (optional bias) -> optional per-head LayerNorm on q
+//     and k (parakeet.encoder.qk_norm) -> RoPE (GPT-NeoX) -> softmax attention
 //     -> out_proj (bias)
-//   - FeedForward: Linear -> GELU -> Linear (both with bias)
+//   - FeedForward: Linear -> GELU -> Linear (both with bias). The GELU is ggml's
+//     tanh form unless parakeet.encoder.activation is "gelu_erf" (exact).
 //   - final_norm LayerNorm
 //
 // All sequences are TIME-MAJOR row-major [T, d_model] (x[t*d_model + c]), which
@@ -62,6 +64,8 @@ private:
     bool pre_block_norm_;
     float rope_base_;
     int n_rot_;          // rotated dims per head (head_dim * rotary_fraction)
+    bool qk_norm_;       // per-head LayerNorm on q and k
+    bool gelu_erf_;      // exact GELU in the FFN
     float ln_eps_;
 };
 

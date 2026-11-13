@@ -43,6 +43,11 @@ struct MelKernel {
 // Keep the first `keep` frames of a row-major [n_mels, T] feature matrix.
 void trim_mel_frames(std::vector<float>& feats, int n_mels, int& T, int keep);
 
+// NeMo normalize_batch (per_feature) on a row-major [n_mels, T] matrix: each mel
+// row is centred and scaled with the mean and unbiased std of its first `valid`
+// frames (std + 1e-5); frames from `valid` on are set to 0.
+void normalize_per_feature(std::vector<float>& feats, int n_mels, int T, int valid);
+
 class MelFrontend {
 public:
     explicit MelFrontend(const ModelLoader& ml);

@@ -154,6 +154,7 @@ set(PARAKEET_SRC
     src/diar_pcm_stream.cpp
     src/scene_stream.cpp
     src/diarization_streaming.cpp
+    src/speechlm_audio.cpp
     src/ced_tagger.cpp
     src/sound_stream.cpp
     src/speaker_registry.cpp

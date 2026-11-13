@@ -304,6 +304,7 @@ VAD accuracy, speed and size, Silero against the Parakeet head against whisper.c
 | [phonon.md](docs/phonon.md) | Phonon-2.5: the container, conversion, parity, WER, the packed files |
 | [bundle.md](docs/bundle.md) | Bundle GGUF format, selection rules, licences, build and verify |
 | [diarization.md](docs/diarization.md) | Diarization, speaker-attributed ASR, encoder fingerprint, speed |
+| [speechlm-audio.md](docs/speechlm-audio.md) | Audio embeddings for the Nemotron 3.5 Transcribe speech LLM (encoder, speaker fusion, adapter) |
 | [sound.md](docs/sound.md) | Sound events (CED) and the scene stream |
 | [speaker.md](docs/speaker.md) | Enroll and name speakers, C API v9 and v10, speaker embeddings, what is not measured |
 | [batching.md](docs/batching.md) | Batched decode, exactness, how to measure |
