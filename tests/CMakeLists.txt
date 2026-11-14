@@ -75,6 +75,10 @@ pk_add_test(test_transcribe_batch_ts)
 pk_add_test(test_decoder_reuse)
 pk_add_test(test_tokenizer)
 pk_add_test(test_special_token_filter)
+# Byte-level BPE tokenizer: the synthetic test always runs; the parity test
+# needs the real tokenizer.json (PARAKEET_BPE_TOKENIZER_JSON) and skips (77) without it.
+pk_add_test(test_bpe_tokenizer)
+pk_add_test(test_bpe_tokenizer_real)
 pk_add_test(test_transcribe)
 pk_add_test(test_transcribe_speech)
 pk_add_test(test_transcribe_tiled)
@@ -319,4 +323,20 @@ if(TARGET parakeet-cli)
   pk_cli_vad_flag_test(cli_vad_cmd_run_gate_text "--run-gate must be in" --run-gate x)
   pk_cli_flag_test(cli_filter_with_beam "word filter works with greedy decoding only" --min-local-conf 0.5 --beam-size 4)
   pk_cli_flag_test(cli_filter_with_stream "word filter is offline only" --drop-punct-only --stream)
+endif()
+
+# Real-tokenizer parity: a setup test converts tokenizer.json to a GGUF in the
+# build tree, then the C++ test compares ids with the committed HF fixture.
+set_tests_properties(test_bpe_tokenizer_real PROPERTIES
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  ENVIRONMENT "PARAKEET_BPE_GGUF=${CMAKE_BINARY_DIR}/bpe_tokenizer_test.gguf"
+  FIXTURES_REQUIRED bpe_tokenizer_gguf)
+if(PARAKEET_PY)
+  add_test(NAME bpe_tokenizer_make_gguf
+           COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/make_bpe_tokenizer_gguf.py
+                   ${CMAKE_BINARY_DIR}/bpe_tokenizer_test.gguf)
+  set_tests_properties(bpe_tokenizer_make_gguf PROPERTIES SKIP_RETURN_CODE 77
+                       FIXTURES_SETUP bpe_tokenizer_gguf)
+  add_test(NAME check_bpe_tokenizer COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_bpe_tokenizer.py)
+  set_tests_properties(check_bpe_tokenizer PROPERTIES SKIP_RETURN_CODE 77)
 endif()
