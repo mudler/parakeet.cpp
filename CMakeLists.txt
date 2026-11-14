@@ -160,7 +160,8 @@ set(PARAKEET_SRC
     src/speaker_identifier.cpp
     src/speaker_encoder.cpp
     src/scene_render.cpp
-    src/silero_vad.cpp)
+    src/silero_vad.cpp
+    src/llm_loader.cpp)
 
 if(PARAKEET_SHARED)
   add_library(parakeet SHARED ${PARAKEET_SRC})

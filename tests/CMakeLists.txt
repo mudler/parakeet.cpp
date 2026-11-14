@@ -265,6 +265,11 @@ if(PARAKEET_PY)
   set_tests_properties(check_bundle PROPERTIES SKIP_RETURN_CODE 77)
 
   # Licence table of scripts/publish_hf.py (no network, no model needed).
+  # LLM converter on a synthetic checkpoint; also feeds its GGUF files to test_llm_loader.
+  add_test(NAME check_llm_convert COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_llm_convert.py)
+  set_tests_properties(check_llm_convert PROPERTIES SKIP_RETURN_CODE 77
+    ENVIRONMENT "PARAKEET_TEST_LLM_LOADER=$<TARGET_FILE:test_llm_loader>")
+
   add_test(NAME check_publish_hf_licences COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_publish_hf_licences.py)
 endif()
 
@@ -273,6 +278,8 @@ add_executable(silero_vad_probe silero_vad_probe.cpp)
 target_link_libraries(silero_vad_probe PRIVATE parakeet)
 target_include_directories(silero_vad_probe PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party)
 pk_add_test(test_silero_framer)
+# Loader of the Nemotron LLM GGUF (synthetic file, no model needed).
+pk_add_test(test_llm_loader)
 pk_add_test(test_silero_load_negative)
 pk_add_test(test_silero_vad)
 pk_add_test(test_vad_options)
