@@ -35,8 +35,8 @@ MelKernel::MelKernel(const ModelLoader& ml) {
     ggml_tensor* w = ml.tensor("preprocessor.featurizer.window");
     if (w) {
         std::vector<float> wbuf;
-        pk::weight_to_host_f32(ml, "preprocessor.featurizer.window", wbuf);
         const int wlen = (int)w->ne[0];
+        pk::weight_to_host_f32(ml, "preprocessor.featurizer.window", wbuf);
         const float* wd = wbuf.data();
         if (wlen == n_fft_) {
             std::memcpy(window_.data(), wd, sizeof(float) * n_fft_);
