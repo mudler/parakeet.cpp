@@ -109,4 +109,26 @@ int apply_word_filter(Transcription& t, const WordFilter& f);
 size_t open_word_start(const std::vector<TokenInfo>& tokens,
                        const std::vector<std::string>& pieces);
 
+// Acoustic word times for a transducer with no duration head (RNN-T). Such a
+// decoder gives each token only its emission frame, and group_words then sets
+// a word to [first emission, last emission + 1 frame]. The emission comes
+// late: on the unified 0.6B checkpoint, against TDT word times on the same
+// clips, word starts are a median 3 frames (0.24 s) late and word ends 2
+// frames (0.16 s) late, and most words are 1 frame long.
+//
+// This moves each word start back by kEmissionDelayFrames and each word end
+// back by kEmissionEndFrames, keeps the words in order without overlap, and
+// extends each word end towards the next word start, up to kMaxWordFrames
+// after the word start. Text, confidence and token indices do not change.
+//
+// Not part of the NeMo-parity output: `transcribe --timestamps` keeps the raw
+// emission times. The scene stream applies it to the words it reports for the
+// unified checkpoint, the only model these values were measured on; there the
+// corrected times decide the speaker of a word. The commit point keeps the raw
+// times.
+constexpr int kEmissionDelayFrames = 3;
+constexpr int kEmissionEndFrames   = 2;
+constexpr int kMaxWordFrames       = 6;
+void refine_emission_word_times(std::vector<Word>& words, float frame_sec);
+
 } // namespace pk

@@ -305,6 +305,27 @@ bool is_punct_only(const std::string& w) {
 
 }  // namespace
 
+void refine_emission_word_times(std::vector<Word>& words, float frame_sec) {
+    const size_t n = words.size();
+    if (n == 0 || !(frame_sec > 0.0f)) return;
+    const float delay = kEmissionDelayFrames * frame_sec;
+    const float end_back = kEmissionEndFrames * frame_sec;
+    const float max_len = kMaxWordFrames * frame_sec;
+    // Shifted starts of the input words, before any clamp: the target for the
+    // end of the word before each one.
+    std::vector<float> shifted(n);
+    for (size_t i = 0; i < n; ++i) shifted[i] = std::max(0.0f, words[i].start - delay);
+    for (size_t i = 0; i < n; ++i) {
+        Word& w = words[i];
+        float s = shifted[i];
+        float e = std::max(s, w.end - end_back);
+        if (i > 0) s = std::max(s, words[i - 1].end);   // no overlap with the previous word
+        if (i + 1 < n) e = std::max(e, std::min(shifted[i + 1], s + max_len));
+        w.start = s;
+        w.end = std::max(e, s);
+    }
+}
+
 int apply_word_filter(Transcription& t, const WordFilter& f) {
     if (!f.active() || t.words.empty()) return 0;
     const size_t n = t.words.size();

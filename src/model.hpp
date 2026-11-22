@@ -145,6 +145,11 @@ public:
         const std::string& target_lang = "") const;
 
     const ParakeetConfig& config() const { return loader_.config(); }
+    // True when the default decoder is a transducer with no duration head
+    // (RNN-T): word times then come from token emission frames only, and
+    // word ends are one frame after the last emission. False for TDT (which
+    // predicts durations) and CTC.
+    bool word_times_from_emission() const;
     // Per-frame speech probability from the model's own VAD head (80 ms frames,
     // cfg.vad.frame_sec). `v` overrides the head wiring for experiments; nullptr
     // uses the defaults. Throws std::runtime_error if the model has no VAD head.

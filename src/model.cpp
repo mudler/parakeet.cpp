@@ -44,6 +44,11 @@ bool arch_prefers_tdt(const std::string& arch) {
 }
 } // namespace
 
+bool Model::word_times_from_emission() const {
+    const ParakeetConfig& cfg = loader_.config();
+    return arch_prefers_tdt(cfg.arch) && cfg.tdt_durations.empty();
+}
+
 std::unique_ptr<Model> Model::load(const std::string& gguf_path, const std::string& component) {
     // unique_ptr<Model> via private ctor: construct then load. We avoid
     // std::make_unique (private ctor) and never throw out of here.
