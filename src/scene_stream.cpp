@@ -9,6 +9,17 @@
 
 namespace pk {
 
+namespace {
+// Digital silence put before a loud window that gave no word, for models
+// without durations (see AsrCommitterOpts::empty_retry_pad_sec).
+constexpr double kEmptyRetryPadSec = 0.16;
+// A pause at least this long after the last committed word moves the resume
+// point into the pause (AsrCommitterOpts::quiet_resume_min_gap_sec).
+constexpr double kQuietResumeMinGapSec = 0.5;
+// Shortest part when such a window is split (AsrCommitterOpts::empty_split_min_sec).
+constexpr double kEmptySplitMinSec = 2.0;
+}  // namespace
+
 SceneStream::SceneStream(const SceneParts& p) {
     if (p.speaker_embed && !p.diar)
         throw std::invalid_argument("speaker identification needs a diarization model");
@@ -25,8 +36,27 @@ SceneStream::SceneStream(const SceneParts& p) {
     if (p.diar) diar_ = std::make_unique<DiarPcmStream>(*p.diar, p.diar_latency);
     if (p.asr) {
         const Model* m = p.asr;
+        // A model without durations (RNN-T) reports late, one-frame word
+        // times, and the offline decode of the unified checkpoint can return
+        // nothing for a window cut out of running speech. Start each window
+        // in a pause and retry a loud window that gave no word; report
+        // acoustic word times for the unified checkpoint. TDT and CTC models
+        // keep the plain committer.
+        AsrCommitterOpts opts;
+        if (m->word_times_from_emission()) {
+            const ParakeetConfig& cfg = m->config();
+            const float frame_sec =
+                (float)cfg.hop_length * (float)cfg.subsampling_factor / (float)cfg.sample_rate;
+            opts.quiet_resume_min_gap_sec = kQuietResumeMinGapSec;
+            opts.empty_retry_pad_sec = kEmptyRetryPadSec;
+            opts.empty_split_min_sec = kEmptySplitMinSec;
+            // The time correction was measured on the unified checkpoint only.
+            if (cfg.unified.present)
+                opts.output_times = [frame_sec](std::vector<Word>& w) { refine_emission_word_times(w, frame_sec); };
+        }
         asr_ = std::make_unique<AsrCommitter>(
-            [m](const std::vector<float>& x) { return m->transcribe_with_timestamps(x, 16000).words; });
+            [m](const std::vector<float>& x) { return m->transcribe_with_timestamps(x, 16000).words; },
+            4.0, 1.0, std::move(opts));
     }
     if (p.tagger)
         sound_ = std::make_unique<SoundStream>(p.tagger->scorer(), p.tagger->n_classes(), p.sound);

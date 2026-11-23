@@ -155,7 +155,261 @@ static void test_speech_after_silence() {
     }
 }
 
+// PCM that is loud everywhere except in [q0, q1) (absolute seconds), with the
+// sample's absolute time recoverable from `times` for the fakes below.
+static std::vector<float> loud_except(double a, double b, double q0, double q1) {
+    std::vector<float> x;
+    for (long i = std::lround(a * 16000); i < std::lround(b * 16000); ++i) {
+        const double t = i / 16000.0;
+        x.push_back(t >= q0 && t < q1 ? 0.0f : ((i & 1) ? 0.3f : -0.3f));
+    }
+    return x;
+}
+
+// quiet_resume: the next window opens in the pause after the last committed
+// word, not at that word's (late) end.
+static void test_quiet_resume() {
+    double next_window_start = -1.0;
+    int calls = 0;
+    AsrCommitterOpts o;
+    o.quiet_resume_min_gap_sec = 0.5;
+    double base = 0.0;   // stream time of the window the fake sees
+    AsrCommitter c([&](const std::vector<float>& pcm) {
+        std::vector<Word> w;
+        ++calls;
+        if (calls == 1) {
+            // "a" ends at 1.0 (late: the sound goes on to 1.2), pause
+            // 1.2-2.0, "b" heard from 2.0 and still open at the cut.
+            w = {{"a", 0.5f, 1.0f, 0.9f}, {"b", 2.0f, 4.6f, 0.9f}};
+        } else {
+            next_window_start = base;
+        }
+        (void)pcm;
+        return w;
+    }, 4.0, 1.0, o);
+    auto x = loud_except(0, 5, 1.2, 2.0);
+    c.push(x.data(), (int)x.size());
+    auto w = c.commit(5.0, false);
+    CHECK(w.size() == 1 && w[0].text == "a");
+    // Resumes inside the 1.2-2.0 pause, not at 1.0.
+    CHECK(c.commit_sec() >= 1.2 - 1e-9 && c.commit_sec() <= 2.0 - 0.04 + 1e-9);
+    base = c.commit_sec();
+    auto y = loud_except(5, 6, 0, 0);
+    c.push(y.data(), (int)y.size());
+    c.commit(6.0, true);
+    CHECK(calls == 2 && next_window_start >= 1.2 - 1e-9);
+}
+
+// Without the option the resume point is the last committed word end.
+static void test_quiet_resume_off_by_default() {
+    AsrCommitter c([](const std::vector<float>&) {
+        return std::vector<Word>{{"a", 0.5f, 1.0f, 0.9f}, {"b", 2.0f, 4.6f, 0.9f}};
+    });
+    auto x = loud_except(0, 5, 1.2, 2.0);
+    c.push(x.data(), (int)x.size());
+    c.commit(5.0, false);
+    CHECK(std::fabs(c.commit_sec() - 1.0) < 1e-6);
+}
+
+// empty_retry_pad_sec: a loud window that gives no word is transcribed again
+// with silence before it, and the words come back at the real-audio times.
+static void test_empty_retry() {
+    int calls = 0;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    AsrCommitter c([&](const std::vector<float>& pcm) {
+        ++calls;
+        std::vector<Word> w;
+        // This fake only hears speech when the window starts with silence.
+        if (!pcm.empty() && pcm[0] == 0.0f) w = {{"hi", 0.16f + 1.0f, 0.16f + 1.4f, 0.9f}};
+        return w;
+    }, 4.0, 1.0, o);
+    auto x = loud_except(0, 3, 0, 0);
+    c.push(x.data(), (int)x.size());
+    auto w = c.commit(3.0, true);
+    CHECK(calls == 2);
+    CHECK(w.size() == 1);
+    if (w.size() == 1) {
+        CHECK(std::fabs(w[0].start - 1.0f) < 1e-4);
+        CHECK(std::fabs(w[0].end - 1.4f) < 1e-4);
+    }
+}
+
+// The retry does not run on a silent window, nor when it is off.
+static void test_empty_retry_skips_silence_and_default() {
+    int calls = 0;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    AsrCommitter c([&](const std::vector<float>&) { ++calls; return std::vector<Word>{}; }, 4.0, 1.0, o);
+    std::vector<float> quiet(16000 * 3, 0.001f);
+    c.push(quiet.data(), (int)quiet.size());
+    c.commit(3.0, true);
+    CHECK(calls == 1);
+    int calls2 = 0;
+    AsrCommitter d([&](const std::vector<float>&) { ++calls2; return std::vector<Word>{}; });
+    auto x = loud_except(0, 3, 0, 0);
+    d.push(x.data(), (int)x.size());
+    d.commit(3.0, true);
+    CHECK(calls2 == 1);
+}
+
+// No pause (the next word starts within the minimum gap): resume at the last
+// committed word end, as without the option.
+static void test_quiet_resume_needs_a_pause() {
+    AsrCommitterOpts o;
+    o.quiet_resume_min_gap_sec = 0.5;
+    AsrCommitter c([](const std::vector<float>&) {
+        return std::vector<Word>{{"a", 0.5f, 1.0f, 0.9f}, {"b", 1.3f, 4.6f, 0.9f}};
+    }, 4.0, 1.0, o);
+    auto x = loud_except(0, 5, 1.05, 1.3);
+    c.push(x.data(), (int)x.size());
+    c.commit(5.0, false);
+    CHECK(std::fabs(c.commit_sec() - 1.0) < 1e-6);
+}
+
+// output_times changes the reported times only: the commit rule and the
+// resume point use the transcriber's times.
+static void test_output_times_only_reported() {
+    AsrCommitterOpts o;
+    o.output_times = [](std::vector<Word>& w) { for (Word& x : w) { x.start -= 0.2f; x.end -= 0.2f; } };
+    AsrCommitter c([](const std::vector<float>&) {
+        // "b" ends at 4.1, past the 4.0 limit: with the shifted times it would
+        // commit, with the transcriber's times it must not.
+        return std::vector<Word>{{"a", 0.5f, 1.0f, 0.9f}, {"b", 3.6f, 4.1f, 0.9f}};
+    }, 4.0, 1.0, o);
+    auto x = timeline(0, 5);
+    c.push(x.data(), (int)x.size());
+    auto w = c.commit(5.0, false);
+    CHECK(w.size() == 1);
+    if (w.size() == 1) {
+        CHECK(std::fabs(w[0].start - 0.3f) < 1e-4);
+        CHECK(std::fabs(w[0].end - 0.8f) < 1e-4);
+    }
+    CHECK(std::fabs(c.commit_sec() - 1.0) < 1e-6);
+}
+
+// A loud window with a quiet stretch in [q0, q1) of its own time.
+static std::vector<float> loud_window(double len, double q0, double q1) {
+    std::vector<float> x;
+    for (long i = 0; i < std::lround(len * 16000); ++i) {
+        const double t = i / 16000.0;
+        x.push_back(t >= q0 && t < q1 ? 0.0f : ((i & 1) ? 0.3f : -0.3f));
+    }
+    return x;
+}
+
+// Split: a fake that only decodes windows of 3.5 s or less (one word, 0.5 s
+// into the window). A 6 s window: full, padded, then the two parts, cut in
+// the quiet stretch; the tail word is shifted by the cut.
+static void test_split_once() {
+    int calls = 0;
+    std::vector<size_t> lens;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    o.empty_split_min_sec = 2.0;
+    AsrCommitter c([&](const std::vector<float>& pcm) {
+        ++calls;
+        lens.push_back(pcm.size());
+        std::vector<Word> w;
+        if (pcm.size() <= 56000) w.push_back({"p" + std::to_string(calls), 0.5f, 0.9f, 0.9f});
+        return w;
+    }, 4.0, 1.0, o);
+    auto x = loud_window(6.0, 2.9, 3.2);
+    c.push(x.data(), (int)x.size());
+    auto w = c.commit(6.0, true);
+    CHECK(calls == 4);
+    CHECK(w.size() == 2);
+    if (lens.size() == 4) {
+        const double cut = lens[2] / 16000.0;
+        CHECK(cut >= 2.9 - 1e-9 && cut <= 3.2 - 0.04 + 1e-9);   // in the quiet stretch
+        CHECK(lens[2] + lens[3] == x.size());
+        if (w.size() == 2) {
+            CHECK(std::fabs(w[0].start - 0.5f) < 1e-4);
+            CHECK(std::fabs(w[1].start - (float)(cut + 0.5)) < 1e-3);   // shifted by the cut
+            CHECK(std::fabs(w[1].end - (float)(cut + 0.9)) < 1e-3);
+        }
+    }
+}
+
+// The split never recurses: a fake that never decodes costs 4 calls and at
+// most 3 times the window audio (plus the pad), whatever the window length.
+static void test_retry_bound() {
+    for (double len : {4.0, 8.0, 17.6, 30.0}) {
+        int calls = 0;
+        size_t samples = 0;
+        AsrCommitterOpts o;
+        o.empty_retry_pad_sec = 0.16;
+        o.empty_split_min_sec = 2.0;
+        AsrCommitter c([&](const std::vector<float>& pcm) {
+            ++calls; samples += pcm.size(); return std::vector<Word>{};
+        }, 4.0, 1.0, o);
+        auto x = loud_window(len, 0, 0);
+        c.push(x.data(), (int)x.size());
+        c.commit(len, true);
+        CHECK(calls == 4);
+        CHECK(samples <= 3 * x.size() + 2560);
+    }
+}
+
+// A part shorter than the minimum is not made: a 3 s window with 2 s parts
+// cannot be split, so only the plain and the padded calls run.
+static void test_split_min_part() {
+    int calls = 0;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    o.empty_split_min_sec = 2.0;
+    AsrCommitter c([&](const std::vector<float>&) { ++calls; return std::vector<Word>{}; }, 4.0, 1.0, o);
+    auto x = loud_window(3.0, 0, 0);
+    c.push(x.data(), (int)x.size());
+    c.commit(3.0, true);
+    CHECK(calls == 2);
+}
+
+// Budget: when a window stayed empty after its retries, the next window over
+// the same audio gets one call only; a window with words resets it.
+static void test_retry_budget() {
+    int calls = 0;
+    bool speech = false;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    o.empty_split_min_sec = 2.0;
+    AsrCommitter c([&](const std::vector<float>&) {
+        ++calls;
+        std::vector<Word> w;
+        if (speech) w.push_back({"w", 0.5f, 0.9f, 0.9f});
+        return w;
+    }, 4.0, 1.0, o);
+    auto x = loud_window(5.0, 0, 0);
+    c.push(x.data(), (int)x.size());
+    c.commit(5.0, false);
+    CHECK(calls == 4);                     // retried: plain, pad, two parts
+    c.push(x.data(), (int)x.size());
+    calls = 0;
+    c.commit(10.0, false);                 // overlaps the empty one
+    CHECK(calls == 1);
+    speech = true;
+    c.push(x.data(), (int)x.size());
+    calls = 0;
+    c.commit(15.0, false);                 // words again: budget reset
+    CHECK(calls == 1);
+    speech = false;
+    c.push(x.data(), (int)x.size());
+    calls = 0;
+    c.commit(20.0, false);
+    CHECK(calls == 4);
+}
+
 int main() {
+    test_split_once();
+    test_retry_bound();
+    test_split_min_part();
+    test_retry_budget();
+    test_quiet_resume();
+    test_quiet_resume_needs_a_pause();
+    test_output_times_only_reported();
+    test_quiet_resume_off_by_default();
+    test_empty_retry();
+    test_empty_retry_skips_silence_and_default();
     test_silence_released();
     test_speech_after_silence();
     test_min_window();

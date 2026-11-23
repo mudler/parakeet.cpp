@@ -166,6 +166,9 @@ target_compile_definitions(test_scene_stream PRIVATE
   PK_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
   PK_CED_SOURCE_DIR="${CMAKE_SOURCE_DIR}/third_party/ced.cpp")
 set_tests_properties(test_scene_stream PROPERTIES LABELS "model")
+pk_add_test(test_scene_unified)
+target_compile_definitions(test_scene_unified PRIVATE PK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set_tests_properties(test_scene_unified PROPERTIES LABELS "model")
 pk_add_test(test_scene_render)
 
 if(TARGET parakeet-cli)
