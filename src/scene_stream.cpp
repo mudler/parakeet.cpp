@@ -36,6 +36,8 @@ SceneStream::SceneStream(const SceneParts& p) {
     if (p.diar) diar_ = std::make_unique<DiarPcmStream>(*p.diar, p.diar_latency);
     if (p.asr) {
         const Model* m = p.asr;
+        const std::string lang = p.asr_lang;
+        m->resolve_prompt_index(lang);   // throws on an unknown language
         // A model without durations (RNN-T) reports late, one-frame word
         // times, and the offline decode of the unified checkpoint can return
         // nothing for a window cut out of running speech. Start each window
@@ -55,7 +57,9 @@ SceneStream::SceneStream(const SceneParts& p) {
                 opts.output_times = [frame_sec](std::vector<Word>& w) { refine_emission_word_times(w, frame_sec); };
         }
         asr_ = std::make_unique<AsrCommitter>(
-            [m](const std::vector<float>& x) { return m->transcribe_with_timestamps(x, 16000).words; },
+            [m, lang](const std::vector<float>& x) {
+                return m->transcribe_with_timestamps(x, 16000, Decoder::kDefault, lang).words;
+            },
             4.0, 1.0, std::move(opts));
     }
     if (p.tagger)

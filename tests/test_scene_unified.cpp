@@ -5,6 +5,9 @@
 //     model returned no word for that window and the second half was lost.
 //     Every word must come back, in order.
 //  2. Word times are acoustic: the median word is longer than one 80 ms frame.
+//  3. parakeet_capi_scene_stream_begin_lang: a known language is accepted, an
+//     unknown one is refused with a message on the ASR context, and a NULL
+//     language gives the same stream as parakeet_capi_scene_stream_begin.
 // Needs PARAKEET_TEST_GGUF_UNIFIED and PARAKEET_TEST_DIAR_GGUF.
 #include "parakeet_capi.h"
 #include "audio_io.hpp"
@@ -104,6 +107,39 @@ int main() {
         std::sort(dur.begin(), dur.end());
         CHECK(!dur.empty() && dur[dur.size() / 2] > 0.081f, "median word length %.3f s is one frame",
               dur.empty() ? 0.0f : dur[dur.size() / 2]);
+    }
+
+    // 3.
+    {
+        parakeet_scene_stream* s =
+            parakeet_capi_scene_stream_begin_lang(asr, nullptr, nullptr, nullptr, nullptr, nullptr, "en");
+        CHECK(s, "target_lang en refused: %s", parakeet_capi_last_error(asr));
+        parakeet_capi_scene_stream_free(s);
+        s = parakeet_capi_scene_stream_begin_lang(asr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                  "zz-not-a-language");
+        CHECK(!s, "an unknown target_lang must be refused");
+        CHECK(std::strstr(parakeet_capi_last_error(asr), "unknown target_lang") != nullptr,
+              "message: %s", parakeet_capi_last_error(asr));
+        parakeet_capi_scene_stream_free(s);
+        // NULL language: the same stream as parakeet_capi_scene_stream_begin.
+        std::vector<float> sp;
+        load16k(std::string(PK_SOURCE_DIR) + "/tests/fixtures/speech.wav", sp);
+        auto run = [&](parakeet_scene_stream* st) {
+            std::string all;
+            for (size_t i = 0; st && i < sp.size(); i += 3200) {
+                const int n = (int)std::min<size_t>(3200, sp.size() - i);
+                char* j = parakeet_capi_scene_stream_feed_json(st, sp.data() + i, n, i + 3200 >= sp.size());
+                if (!j) break;
+                all += j;
+                parakeet_capi_free_string(j);
+            }
+            parakeet_capi_scene_stream_free(st);
+            return all;
+        };
+        const std::string a = run(parakeet_capi_scene_stream_begin(asr, nullptr, nullptr, nullptr));
+        const std::string b = run(parakeet_capi_scene_stream_begin_lang(asr, nullptr, nullptr, nullptr, nullptr,
+                                                                        nullptr, nullptr));
+        CHECK(!a.empty() && a == b, "begin_lang(NULL) differs from begin");
     }
 
     parakeet_capi_free(asr);

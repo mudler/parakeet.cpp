@@ -19,6 +19,9 @@ class CedTagger;
 // The models a scene stream runs over. Any may be null; at least one is needed.
 struct SceneParts {
     const Model* asr = nullptr;
+    // Language for a prompt-conditioned ASR model ("" = the model default,
+    // `auto` for the unified checkpoint). Ignored by models without a prompt.
+    std::string asr_lang;
     const DiarizationModel* diar = nullptr;
     DiarLatency diar_latency = DiarLatency::Model;
     CedTagger* tagger = nullptr;     // sound events

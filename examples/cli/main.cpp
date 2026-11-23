@@ -2111,17 +2111,19 @@ static const char* kSceneUsage =
     "usage: parakeet-cli scene [--model <m.gguf>] [--diar <diar.gguf>] "
     "[--sound <ced.gguf>] [--speakers <speaker.gguf> --registry <file> "
     "[--speaker-threshold F] [--strict-registry]] --input <wav|-> "
-    "[--latency model|low|very_low|ultra_low] [--chunk-ms N] "
+    "[--latency model|low|very_low|ultra_low] [--chunk-ms N] [--lang <locale>] "
     "[--show-speech] [--json]\n"
     "  each model may be a bundle GGUF (the only component of the right kind is used); name another with\n"
     "  --asr-component, --diar-component, --sound-component or --speakers-component\n"
     "  --speaker-threshold: default 0.5; ECAPA needs about 0.7, see docs/speaker.md\n"
-    "  --strict-registry: refuse a registry with no encoder fingerprint\n";
+    "  --strict-registry: refuse a registry with no encoder fingerprint\n"
+    "  --lang: ASR language for a model with a language prompt (default: the model default)\n";
 
 // parakeet-cli scene [--model <m.gguf>] [--diar <diar.gguf>] [--sound <ced.gguf>]
 //                    [--speakers <speaker.gguf> --registry <file> [--speaker-threshold F]]
 //                    --input <wav|-> [--latency model|low|very_low|ultra_low]
-//                    [--chunk-ms N] [--show-speech] [--json]
+//                    [--chunk-ms N] [--lang <locale>] [--show-speech] [--json]
+// --lang sets the language prompt of a prompt-conditioned ASR model.
 // --speakers names diarized speakers from the enrolled voices in --registry
 // (made by `parakeet-cli enroll`); it needs --diar and --registry.
 // Streams the WAV through pk::SceneStream (ASR + diarization + sound events,
@@ -2129,7 +2131,7 @@ static const char* kSceneUsage =
 // transcript with sound annotations. --json prints scene_update_to_json per
 // update (one JSON document per line) instead of the rendered transcript.
 static int cmd_scene(int argc, char** argv) {
-    std::string model, diar, sound, input, latency_str;
+    std::string model, diar, sound, input, latency_str, lang;
     std::string speakers, registry_path;
     bool strict_registry = false;
     std::string asr_comp_arg, diar_comp_arg, sound_comp_arg, speakers_comp_arg;
@@ -2174,6 +2176,8 @@ static int cmd_scene(int argc, char** argv) {
             latency_str = argv[++i];
         } else if (std::strcmp(argv[i], "--chunk-ms") == 0 && i + 1 < argc) {
             chunk_ms = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+            lang = argv[++i];
         } else if (std::strcmp(argv[i], "--json") == 0) {
             json = true;
         } else if (std::strcmp(argv[i], "--show-speech") == 0) {
@@ -2320,6 +2324,7 @@ static int cmd_scene(int argc, char** argv) {
 
     pk::SceneParts parts;
     parts.asr = asr_model.get();
+    parts.asr_lang = lang;
     parts.diar = diar_model.get();
     parts.diar_latency = latency;
     parts.tagger = tagger.get();

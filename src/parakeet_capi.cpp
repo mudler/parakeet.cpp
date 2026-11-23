@@ -2376,6 +2376,12 @@ extern "C" parakeet_scene_stream* parakeet_capi_scene_stream_begin(parakeet_ctx*
 extern "C" parakeet_scene_stream* parakeet_capi_scene_stream_begin_speaker(
     parakeet_ctx* asr, parakeet_ctx* diar, parakeet_ctx* tagger, parakeet_ctx* speaker,
     parakeet_speaker_registry* registry, const parakeet_scene_opts* o) {
+    return parakeet_capi_scene_stream_begin_lang(asr, diar, tagger, speaker, registry, o, nullptr);
+}
+
+extern "C" parakeet_scene_stream* parakeet_capi_scene_stream_begin_lang(
+    parakeet_ctx* asr, parakeet_ctx* diar, parakeet_ctx* tagger, parakeet_ctx* speaker,
+    parakeet_speaker_registry* registry, const parakeet_scene_opts* o, const char* target_lang) {
     if (speaker) {
         if (!require_speaker(speaker)) return nullptr;
         if (!diar) { speaker->last_error = "speaker identification needs a diarization model"; return nullptr; }
@@ -2396,6 +2402,15 @@ extern "C" parakeet_scene_stream* parakeet_capi_scene_stream_begin_speaker(
         diar->last_error = "unknown diarization latency mode";
         return nullptr;
     }
+    const std::string asr_lang = target_lang ? target_lang : "";
+    if (asr && !asr_lang.empty()) {
+        try {
+            asr->model->resolve_prompt_index(asr_lang);
+        } catch (const std::exception& e) {
+            asr->last_error = e.what();
+            return nullptr;
+        }
+    }
     pk::SpeakerIdOpts so;
     if (speaker) {
         so.accept_threshold = scene_float_field(o, offsetof(parakeet_scene_opts, speaker_accept_threshold), so.accept_threshold);
@@ -2415,6 +2430,7 @@ extern "C" parakeet_scene_stream* parakeet_capi_scene_stream_begin_speaker(
             p.speaker_opts = so;
         }
         p.asr = asr ? asr->model.get() : nullptr;
+        p.asr_lang = asr_lang;
         p.diar = diar ? diar->diar.get() : nullptr;
         p.diar_latency = latency_from_int(o->diar_latency);
         p.tagger = tagger ? tagger->tagger.get() : nullptr;

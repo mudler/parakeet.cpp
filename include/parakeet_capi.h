@@ -91,6 +91,9 @@ typedef struct parakeet_ctx parakeet_ctx;
 //      must check parakeet_capi_stream_kind == PARAKEET_STREAM_KIND_BUFFERED.
 // Speech LLM audio embeddings (parakeet_capi_load_speechlm_audio, parakeet_capi_audio_embed_*,
 //      PARAKEET_MODEL_KIND_SPEECHLM_AUDIO; docs/speechlm-audio.md) are additive and keep ABI v10.
+// Scene ASR language (parakeet_capi_scene_stream_begin_lang) is additive and
+//      keeps ABI v11: parakeet_scene_opts is unchanged, a caller that needs the
+//      call checks for the symbol (dlsym).
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -1064,6 +1067,19 @@ parakeet_scene_stream* parakeet_capi_scene_stream_begin_speaker(parakeet_ctx* as
                                                                  parakeet_ctx* speaker,
                                                                  parakeet_speaker_registry* registry,
                                                                  const parakeet_scene_opts* o);
+
+// Like parakeet_capi_scene_stream_begin_speaker, plus the ASR language for a
+// prompt-conditioned model (for example "en", "de", "auto"). NULL or "" = the
+// model default, and the call is then exactly
+// parakeet_capi_scene_stream_begin_speaker. Models without a language prompt
+// ignore it. An unknown value returns NULL with last_error on the ASR context.
+// Additive (ABI v11): parakeet_scene_opts does not change.
+parakeet_scene_stream* parakeet_capi_scene_stream_begin_lang(parakeet_ctx* asr, parakeet_ctx* diar,
+                                                              parakeet_ctx* tagger,
+                                                              parakeet_ctx* speaker,
+                                                              parakeet_speaker_registry* registry,
+                                                              const parakeet_scene_opts* o,
+                                                              const char* target_lang);
 
 // Same document as parakeet_capi_transcribe_and_diarize_json, plus "name" and
 // "name_score" on each utterance and word (empty name = unknown) and a
