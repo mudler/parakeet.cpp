@@ -230,7 +230,7 @@ tagger into one time-ordered feed. At least one of `--model`, `--diar`,
 ```
 parakeet-cli scene --model <asr.gguf> --diar <diar.gguf> --sound <ced.gguf> \
     --input <audio.wav> [--latency model|low|very_low|ultra_low] [--chunk-ms N] \
-    [--show-speech] [--json]
+    [--lang <locale>] [--show-speech] [--json]
 ```
 
 `--latency` picks the diarization streaming mode (see `docs/diarization.md`);
@@ -240,7 +240,9 @@ speech labels (`Speech`, `Speech synthesizer`, `Conversation`, and similar)
 in the sound output; by default they are filtered out since they are
 redundant with the ASR transcript. `--json` prints one
 `parakeet_capi_scene_stream_feed_json` document per step instead of the
-rendered text.
+rendered text. `--lang` sets the language prompt of a prompt-conditioned ASR
+model (see [ASR models in the scene](#asr-models-in-the-scene)); other models
+ignore it.
 
 Real output, all three models, `--latency low`, on a demo clip (two
 LibriSpeech speakers, a rooster clip, then a second LibriSpeech excerpt):
@@ -279,6 +281,99 @@ speaker segment prints as `[start - end]  Speaker N`, in time order with
 the sound lines. A segment line waits while an earlier-starting segment is
 still open.
 
+### ASR models in the scene
+
+The scene does not stream the ASR. It transcribes windows of at least 4 s
+with the offline model and commits the words that end at least 1 s before the
+end of the window (`src/asr_committer.cpp`). The next window starts after the
+last committed word. Any offline ASR model works, with these differences:
+
+| | TDT (`parakeet-tdt-0.6b-v3`) | RNN-T with no durations (`nemotron-labs-unified-asr-0.6b`) |
+|---|---|---|
+| Word times | from the predicted token durations | from the token emission frames, corrected for this checkpoint (below) |
+| Window guards | none (unchanged) | on (below) |
+| Language | implicit | `--lang` / `parakeet_capi_scene_stream_begin_lang`, default `auto` |
+
+To use the unified model, pass its GGUF as `--model`:
+
+```
+parakeet-cli scene --model nemotron-labs-unified-asr-0.6b-q8_0.gguf --diar diar.gguf \
+    --sound ced.gguf --input <audio.wav> [--lang en]
+```
+
+A model with no duration head (`pk::Model::word_times_from_emission()`) gets
+the window guards below in the scene, and the unified checkpoint also gets
+corrected word times. TDT and CTC models get neither, and their scene output
+does not change. Other RNN-T models without durations (for example
+`parakeet-rnnt-0.6b`) get the guards, but they were not measured with them.
+
+* **Word times (unified checkpoint only).** RNN-T tokens only have an
+  emission frame, and the emission comes late. Against TDT word times on the same clips, the raw unified word
+  starts are a median 0.24 s late, and most words are one 80 ms frame long.
+  The scene moves each word start back 3 frames and each word end back 2
+  frames, and extends a word end towards the next word start, at most 6 frames
+  after the word start (`pk::refine_emission_word_times`). The speaker of a
+  word comes from these times. The commit rule still uses the raw times.
+  `transcribe --timestamps` is not changed: it keeps the raw times that match
+  NeMo.
+* **Resume in a pause.** When the next word heard starts at least 0.5 s after
+  the last committed word, the next window starts at the quietest 40 ms of
+  that pause (at most 1 s into it), not on the tail of the last word.
+* **Retry an empty window.** The unified model can return no word at all for
+  a window cut out of running speech, also in NeMo on the same window. When a
+  window that is not silent gives no word, the scene transcribes it again with
+  0.16 s of silence before it, and if it is still empty, splits it once at its
+  quietest point in the middle third (parts of at least 2 s) and transcribes
+  the two parts. That is at most 4 decodes and 3 times the audio of that
+  window. When a window stayed empty after these retries, the next window over
+  the same audio is not retried, so a long stretch of loud non-speech (music,
+  noise) pays for the retries once.
+
+Measured on CPU with the q8_0 unified model and the q8_0 Nemotron-3
+diarization model: word error rate of the scene words. The reference is the
+TDT v3 transcript of the source clips for the first two inputs (the TDT scene
+output at `model` latency for the first, the offline TDT transcript of the two
+source files for the second), and the source transcripts for the last two.
+
+| Input | `--latency` | Unified before | Unified after | TDT v3 f16 (unchanged) |
+|---|---|---|---|---|
+| `two_speakers.wav` + 0.6 s + 4 s tones + 0.6 s + `speech.wav` (36.2 s) | model | 42.5% | 0.0% | 0.0% |
+| same | low | 3.4% | 3.4% | 24.1% |
+| `two_speakers.wav` + 0.6 s silence + `speech.wav` (31.6 s) | model | 43.2% | 1.1% | 1.1% |
+| same | low | 6.8% | 3.4% | 30.7% |
+| 3 FLEURS en + 2 FLEURS de test clips, 0.6 s apart (58.9 s) | model | 7.1% | 3.1% | 10.2% |
+| same | low | 10.2% | 10.2% | 28.6% |
+| English and German read speech (85.1 s), not used to choose the guards | model | 4.7% | 5.5% | |
+| same | low | 9.4% | 7.0% | |
+
+Word times in the scene against TDT on the same words (36.2 s input, `model`
+latency): start error median 0.24 s, p90 0.48 s before; median 0.08 s, p90
+0.23 s after. The median word length is 0.24 s after, 0.08 s before.
+
+Limits of the unified model in the scene:
+
+* The guards change which windows the model sees, so they can also change a
+  correct word: on the 85.1 s held-out input at `model` latency one correct
+  word became wrong (4.7% to 5.5%), while `low` latency improved (9.4% to
+  7.0%).
+* Loud non-speech costs more CPU: on a 58.4 s clip of noise and synthetic chords around
+  speech, the scene ASR user CPU went from 12.2 s to 24.5 s at `model`
+  latency and from 62.0 s to 65.2 s at `low` latency (whole run, diarization
+  included). The transcript did not change.
+* Words can still be lost where a window opens in running speech: the model
+  drops the first words of such a window (also in NeMo). The `low` latency
+  modes commit more often and open more windows in speech.
+* The word times are an estimate. On 8 clips (5 English, and 3 German that
+  were not used to choose the correction) the corrected starts are within
+  0.08 s of TDT for half of the words, and within 0.24 s for 90%.
+* `--lang` did not change the transcript on any of the 9 English and German
+  clips we checked (offline), nor on `speech.wav` in the scene: the model
+  found the language itself. The model card says the prompt matters most in
+  low-latency streaming, where the first chunks hold little speech. Set it
+  when you know the language; `auto` is the default.
+* There is no end-of-utterance event: the scene text commits on the window
+  rule only.
+
 ## Scene stream C-API
 
 `include/parakeet_capi.h`, additive since ABI v8. One stream carries any mix
@@ -292,6 +387,11 @@ typedef struct {
     int diar_latency;            // PARAKEET_DIAR_LATENCY_*, used only with a diar ctx
     parakeet_sound_opts sound;   // used only with a tagger ctx
     int flags;                   // reserved, must be 0
+    float speaker_accept_threshold;   // speaker fields: see docs/speaker.md
+    float speaker_margin;
+    float speaker_min_voice_sec;
+    float speaker_refresh_sec;
+    float speaker_max_voice_sec;
 } parakeet_scene_opts;
 void parakeet_capi_scene_opts_default(parakeet_scene_opts* o);
 
@@ -300,6 +400,11 @@ typedef struct parakeet_scene_stream parakeet_scene_stream;
 parakeet_scene_stream* parakeet_capi_scene_stream_begin(parakeet_ctx* asr, parakeet_ctx* diar,
                                                          parakeet_ctx* tagger,
                                                          const parakeet_scene_opts* o);
+parakeet_scene_stream* parakeet_capi_scene_stream_begin_lang(parakeet_ctx* asr, parakeet_ctx* diar,
+                                                              parakeet_ctx* tagger, parakeet_ctx* speaker,
+                                                              parakeet_speaker_registry* registry,
+                                                              const parakeet_scene_opts* o,
+                                                              const char* target_lang);
 char* parakeet_capi_scene_stream_feed_json(parakeet_scene_stream* s, const float* pcm, int n,
                                            int is_last);
 char* parakeet_capi_scene_stream_drain_scores_json(parakeet_scene_stream* s);
@@ -312,6 +417,14 @@ The context arguments are borrowed (same lifetime rule as `sas_stream` and
 was given. Passing `NULL` for a context leaves that part out of the stream;
 `diar_latency` and `sound` in `parakeet_scene_opts` are ignored when the
 matching context is `NULL`.
+
+To set the language prompt of a prompt-conditioned ASR model, use
+`parakeet_capi_scene_stream_begin_lang` (additive, ABI v11). It takes the
+arguments of `parakeet_capi_scene_stream_begin_speaker` plus `target_lang`, for
+example `"en"` or `"auto"`. `NULL` or `""` keeps the model default; models
+without a prompt ignore it. An unknown value returns `NULL` with the message in
+`parakeet_capi_last_error` of the ASR context. `parakeet_scene_opts` does not
+change, so callers and bindings built for the earlier layout keep working.
 
 Each `_feed_json` document has the shape:
 

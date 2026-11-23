@@ -18,6 +18,7 @@ script differ, so change both together.
 | `moondream/parakeet-ultra` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |
 | `nvidia/Nemotron-3-Diarization` | OpenMDW 1.1 | <https://openmdw.ai/license/1-1/> |  |
 | `nvidia/nemotron-3.5-asr-streaming-0.6b` | OpenMDW 1.1 | <https://openmdw.ai/license/1-1/> |  |
+| `nvidia/nemotron-labs-unified-asr-0.6b` | OpenMDW 1.1 | <https://openmdw.ai/license/1-1/> | Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. Use of this model is governed by the OpenMDW License Agreement, version 1.1 |
 | `nvidia/parakeet-ctc-0.6b` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |
 | `nvidia/parakeet-ctc-1.1b` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |
 | `nvidia/parakeet-rnnt-0.6b` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |

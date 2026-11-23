@@ -63,6 +63,7 @@ ALL_MODELS = [
     "nvidia/parakeet-tdt_ctc-110m",
     "nvidia/parakeet_realtime_eou_120m-v1",
     "nvidia/nemotron-3.5-asr-streaming-0.6b",
+    "nvidia/nemotron-labs-unified-asr-0.6b",
     "nvidia/parakeet-ctc-0.6b",
     "nvidia/parakeet-rnnt-0.6b",
     "nvidia/parakeet-tdt-0.6b-v2",
@@ -136,6 +137,19 @@ KNOWN_WER: dict = {
         "q5_k": {"wer": None, "size_mb": 784.8},
         "q4_k": {"wer": None, "size_mb": 718.1},
     },
+    # Unified offline + buffered streaming model, prompt-conditioned. The WER is
+    # agreement with NeMo (offline), not accuracy on a speech corpus. Evidence
+    # (docs/parity.md): f32, f16 and q8_0 match NeMo on en and de (WER 0); f16
+    # also on `auto` (7 clips: speech.wav, 3 FLEURS en, 3 FLEURS de). Q6_K, Q5_K
+    # and Q4_K: no NeMo agreement is recorded in the repo, so none is claimed.
+    # prompt_kernel + LSTM + norms + biases stay F32.
+    "nvidia/nemotron-labs-unified-asr-0.6b": {
+        "f16":  {"wer": 0.0, "size_mb": 1439.6},
+        "q8_0": {"wer": 0.0, "size_mb": 939.2},
+        "q6_k": {"wer": None, "size_mb": 811.3},
+        "q5_k": {"wer": None, "size_mb": 740.4},
+        "q4_k": {"wer": None, "size_mb": 673.8},
+    },
 }
 
 # Per-model licence: (frontmatter license id, human label, licence url).
@@ -157,6 +171,7 @@ LICENSES: dict = {
     "nvidia/parakeet-tdt_ctc-110m": CC_BY_4_0,
     "nvidia/parakeet_realtime_eou_120m-v1": NVIDIA_OML,
     "nvidia/nemotron-3.5-asr-streaming-0.6b": OPENMDW_1_1,
+    "nvidia/nemotron-labs-unified-asr-0.6b": OPENMDW_1_1,
     "nvidia/parakeet-ctc-0.6b": CC_BY_4_0,
     "nvidia/parakeet-rnnt-0.6b": CC_BY_4_0,
     "nvidia/parakeet-tdt-0.6b-v2": CC_BY_4_0,
@@ -180,6 +195,9 @@ LICENSE_NOTICES: dict = {
         "Licensed by NVIDIA Corporation under the NVIDIA Open Model License",
     "snakers4/silero-vad":
         "Copyright (c) 2020-present Silero Team. Released under the MIT license",
+    "nvidia/nemotron-labs-unified-asr-0.6b":
+        "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. "
+        "Use of this model is governed by the OpenMDW License Agreement, version 1.1",
     "FermionResearch/Phonon-2.5":
         "Phonon-2.5, Copyright 2026 Fermion Research, derived from nvidia/parakeet-tdt-0.6b-v3 "
         "(c) NVIDIA Corporation. Training audio includes CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms)",
@@ -200,6 +218,7 @@ EXTERNAL_SECTIONS: list = [
 # Extra text that follows the table of a converted model (note + usage).
 MODEL_EXTRA_SECTIONS: dict = {
     "nvidia/nemotron-3.5-asr-streaming-0.6b": "nemotron-3.5-note.md",
+    "nvidia/nemotron-labs-unified-asr-0.6b": "nemotron-unified-note.md",
 }
 CARD_SECTIONS_DIR = SCRIPTS_DIR / "hf_card"
 

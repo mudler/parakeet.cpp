@@ -47,10 +47,12 @@ than a single `[left,right]`, so the converter records all of them in
 
 The `parakeet.unified.*` keys (written by `scripts/unified_kvs.py`, which `tests/python/check_unified_kvs.py` checks without NeMo) are emitted **only for unified checkpoints**
 (`att_context_style == "chunked_limited_with_rc"`, e.g.
-`nvidia/nemotron-labs-unified-asr-0.6b`). Offline inference is full context, so
-these keys only describe the buffered-streaming presets for a later stage. The
-converter writes no `parakeet.streaming.*` or causal keys for these models, so
-`streaming.present` stays `false` and the `stream_*` C-API refuses them. The
+`nvidia/nemotron-labs-unified-asr-0.6b`). Offline inference is full context. The keys
+describe the buffered-streaming presets: `--stream` and the `stream_*` C-API run
+these models with `pk::BufferedStreamingSession`, which re-encodes a
+`[left|chunk|right]` window at each step (see `docs/capi.md`). The converter
+writes no `parakeet.streaming.*` or causal keys for these models, so
+`streaming.present` stays `false`: they are not cache-aware. The
 loader rejects a unified file whose presets are not `[L,C,R]` triples with
 `C >= 1`, or whose default index is out of range.
 
