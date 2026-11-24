@@ -360,3 +360,7 @@ if(PARAKEET_PY)
   add_test(NAME check_bpe_tokenizer COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_bpe_tokenizer.py)
   set_tests_properties(check_bpe_tokenizer PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+# CPU-only, no checkpoint: the cached linear_pos projection of the streaming encoder
+# equals the per-step computation it replaced, and the cache stays bounded.
+pk_add_test(test_streaming_pos_cache)

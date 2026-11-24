@@ -93,9 +93,18 @@ private:
     // cache_last_channel[layer]: row-major [last_channel_cache, d_model]
     std::vector<std::vector<float>> cache_channel_;
     // linear_pos(pos_emb) split into heads, [layer] -> [dk, pos_len, H], per window
-    // length Tc + cache_len (see pos_heads()).
+    // length Tc + cache_len (see pos_heads()). Bounded: see kMaxPosWindows.
+    static constexpr size_t kMaxPosWindows = 4;
     std::map<int, std::vector<std::vector<float>>> pos_heads_;
+    std::vector<int> pos_lru_;   // window lengths, least recently used first
+public:
+    // linear_pos(pos_emb) per layer for a window of `window` frames (Tc + cache_len),
+    // each [dk, 2*window-1, H] row-major with dk fastest. Cached; step() calls it.
+    // The returned reference stays valid until a later call evicts that window.
     const std::vector<std::vector<float>>& pos_heads(int window);
+    // Number of window lengths currently cached.
+    size_t pos_cache_size() const { return pos_heads_.size(); }
+private:
 };
 
 } // namespace pk

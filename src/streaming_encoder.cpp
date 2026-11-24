@@ -5,6 +5,7 @@
 #include "backend.hpp"
 #include "graph_builder.hpp"
 #include "ggml.h"
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -359,7 +360,11 @@ static ggml_tensor* build_stream_layer(
 // ops on the same inputs, so the outputs are unchanged.
 const std::vector<std::vector<float>>& StreamingEncoder::pos_heads(int window) {
     auto it = pos_heads_.find(window);
-    if (it != pos_heads_.end()) return it->second;
+    if (it != pos_heads_.end()) {
+        pos_lru_.erase(std::find(pos_lru_.begin(), pos_lru_.end(), window));
+        pos_lru_.push_back(window);
+        return it->second;
+    }
 
     const int D = d_model_, H = n_heads_, dk = D / H;
     const int pos_len = 2 * window - 1;
@@ -379,6 +384,14 @@ const std::vector<std::vector<float>>& StreamingEncoder::pos_heads(int window) {
         if (!ok || (int)heads[i].size() != dk * pos_len * H)
             throw std::runtime_error("streaming encoder: linear_pos precompute failed");
     }
+    // The window length comes from the caller's chunk size, so a caller that varies it
+    // would add one entry (~14 MB in f32 on a Nemotron-size model) per new value for the
+    // whole session. Keep the few most recent lengths and evict the least recently used.
+    while (pos_heads_.size() >= kMaxPosWindows && !pos_lru_.empty()) {
+        pos_heads_.erase(pos_lru_.front());
+        pos_lru_.erase(pos_lru_.begin());
+    }
+    pos_lru_.push_back(window);
     return pos_heads_.emplace(window, std::move(heads)).first->second;
 }
 
@@ -420,7 +433,10 @@ std::vector<float> StreamingEncoder::step(const std::vector<float>& mel_chunk_fr
     const int clc_len_now = clc_len_;   // snapshot for the in-graph mask
 
     const std::string cnt = ml_.config().conv_norm_type;
-    const std::vector<std::vector<float>>& pos_heads = this->pos_heads(Pn);
+    // The first chunk of a window length runs one small run_graph per layer (24 on a
+    // Nemotron-size model) to build the projection: a one-off latency spike on that
+    // chunk. Later chunks with the same window length reuse the cached result.
+    const std::vector<std::vector<float>>& pos_proj = this->pos_heads(Pn);
     StreamLayerCapture caps[/*max layers*/64];
     assert(n_layers_ <= 64);
 
@@ -471,7 +487,7 @@ std::vector<float> StreamingEncoder::step(const std::vector<float>& mel_chunk_fr
                         GGML_TYPE_F32, 2, t_ne, cache_time_[i].data(),
                         cache_time_[i].size() * sizeof(float));
 
-                x = build_stream_layer(ctx, ml_, i, x, Tc, pos_heads[i].data(), pos_len,
+                x = build_stream_layer(ctx, ml_, i, x, Tc, pos_proj[i].data(), pos_len,
                                        cache_len, clc_len_now, n_heads_, D,
                                        conv_kernel_, att_left_, att_right_, cnt,
                                        cache_ch_t, cache_t_t, pool, &caps[i]);
