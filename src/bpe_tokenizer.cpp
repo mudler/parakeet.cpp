@@ -165,7 +165,7 @@ bool BpeTokenizer::init(BpeVocab v, std::string* err) {
         if (a == vocab_.end() || b == vocab_.end() || c == vocab_.end())
             return fail("merge " + std::to_string(r) + " refers to a token outside the vocabulary");
         uint64_t key = ((uint64_t)(uint32_t)a->second << 32) | (uint32_t)b->second;
-        if (pair_rank_.emplace(key, (uint32_t)r).second) {}
+        pair_rank_.emplace(key, (uint32_t)r);  // a duplicate pair keeps its first (lowest) rank
         rank_result_.push_back(c->second);
     }
     return true;
@@ -225,7 +225,7 @@ std::unique_ptr<BpeTokenizer> BpeTokenizer::load_gguf(const std::string& path, s
         v.token_types.assign(v.tokens.size(), kTokNormal);
     }
     int64_t im = find(bpe_keys::kIgnoreMerges);
-    v.ignore_merges = im < 0 ? false : gguf_get_val_bool(g, im);
+    if (im >= 0) v.ignore_merges = gguf_get_val_bool(g, im);   // absent: keep the struct default
     v.bos_id = i32(bpe_keys::kBos);
     v.eos_id = i32(bpe_keys::kEos);
     v.unk_id = i32(bpe_keys::kUnk);
@@ -417,7 +417,6 @@ void BpeTokenizer::encode_word(const unsigned char* p, size_t n, std::vector<int
         uint64_t key = ((uint64_t)(uint32_t)l.id << 32) | (uint32_t)r.id;
         auto it = pair_rank_.find(key);
         if (it == pair_rank_.end() || rank_result_[it->second] != t.new_id) continue;  // stale
-        int32_t right = l.next;
         l.id = t.new_id;
         l.len += r.len;
         l.next = r.next;
@@ -425,7 +424,6 @@ void BpeTokenizer::encode_word(const unsigned char* p, size_t n, std::vector<int
         if (l.next >= 0) sy[(size_t)l.next].prev = t.pos;
         if (l.prev >= 0) push(l.prev);
         push(t.pos);
-        (void)right;
     }
     for (int32_t i = 0; i >= 0; i = sy[(size_t)i].next) out.push_back(sy[(size_t)i].id);
 }

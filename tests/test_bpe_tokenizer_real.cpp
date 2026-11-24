@@ -5,6 +5,7 @@
 // scripts/gen_bpe_tokenizer_fixture.py). Skips (77) when the GGUF is absent.
 #include "bpe_tokenizer.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -146,12 +147,23 @@ int main() {
     std::vector<int32_t> bi = tok->encode(big);
     double big_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - b0).count();
     std::string rt = tok->decode(bi);
+    // One word of 12500 symbols, then of 100000 (8x). Linear work grows about 8x, quadratic 64x.
+    std::string small_word(12500, 'a');
+    auto s0 = std::chrono::steady_clock::now();
+    std::vector<int32_t> si = tok->encode(small_word);
+    double small_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
     std::string worst(100000, 'a');                      // one word of 100000 symbols
     auto w0 = std::chrono::steady_clock::now();
     std::vector<int32_t> wi = tok->encode(worst);
     double worst_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
     std::printf("100 KB text: %zu ids in %.1f ms; 100 KB single word: %zu ids in %.1f ms\n", bi.size(), big_ms, wi.size(), worst_ms);
-    if (rt != big || tok->decode(wi) != worst || big_ms > 1000 || worst_ms > 1000) {
+    // The bounds are loose on purpose: a loaded runner must not fail this. The scaling check
+    // (with a 5 ms floor on the small time) catches quadratic behaviour; the absolute caps
+    // catch anything gross.
+    const double kHardCapMs = 20000;
+    const bool scaling_ok = worst_ms <= 30.0 * std::max(small_ms, 5.0);
+    if (rt != big || tok->decode(wi) != worst || tok->decode(si) != small_word || big_ms > kHardCapMs ||
+        worst_ms > kHardCapMs || !scaling_ok) {
         std::fprintf(stderr, "long input check failed\n");
         rc = 1;
     }

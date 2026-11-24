@@ -278,12 +278,12 @@ if(PARAKEET_PY)
   add_test(NAME check_bundle COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_bundle.py)
   set_tests_properties(check_bundle PROPERTIES SKIP_RETURN_CODE 77)
 
-  # Licence table of scripts/publish_hf.py (no network, no model needed).
   # LLM converter on a synthetic checkpoint; also feeds its GGUF files to test_llm_loader.
   add_test(NAME check_llm_convert COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_llm_convert.py)
   set_tests_properties(check_llm_convert PROPERTIES SKIP_RETURN_CODE 77
     ENVIRONMENT "PARAKEET_TEST_LLM_LOADER=$<TARGET_FILE:test_llm_loader>")
 
+  # Licence table of scripts/publish_hf.py (no network, no model needed).
   add_test(NAME check_publish_hf_licences COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/check_publish_hf_licences.py)
 endif()
 
@@ -346,9 +346,11 @@ endif()
 # build tree, then the C++ test compares ids with the committed HF fixture.
 set_tests_properties(test_bpe_tokenizer_real PROPERTIES
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-  ENVIRONMENT "PARAKEET_BPE_GGUF=${CMAKE_BINARY_DIR}/bpe_tokenizer_test.gguf"
-  FIXTURES_REQUIRED bpe_tokenizer_gguf)
+  ENVIRONMENT "PARAKEET_BPE_GGUF=${CMAKE_BINARY_DIR}/bpe_tokenizer_test.gguf")
 if(PARAKEET_PY)
+  # Only with Python is there a setup test to require. Without it the test finds no GGUF
+  # and skips (77).
+  set_tests_properties(test_bpe_tokenizer_real PROPERTIES FIXTURES_REQUIRED bpe_tokenizer_gguf)
   add_test(NAME bpe_tokenizer_make_gguf
            COMMAND ${PARAKEET_PY} ${CMAKE_SOURCE_DIR}/tests/python/make_bpe_tokenizer_gguf.py
                    ${CMAKE_BINARY_DIR}/bpe_tokenizer_test.gguf)
