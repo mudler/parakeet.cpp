@@ -399,7 +399,35 @@ static void test_retry_budget() {
     CHECK(calls == 4);
 }
 
+// A silent window that gives no word ends the empty stretch: a loud window
+// that follows gets its retries again, even when it overlaps the stretch.
+static void test_silent_window_resets_budget() {
+    int calls = 0;
+    AsrCommitterOpts o;
+    o.empty_retry_pad_sec = 0.16;
+    o.empty_split_min_sec = 2.0;
+    AsrCommitter c([&](const std::vector<float>&) {
+        ++calls;
+        return std::vector<Word>();
+    }, 1.0, 1.0, o);
+    auto x = loud_window(5.0, 2.0, 5.0);   // loud, then quiet
+    c.push(x.data(), (int)x.size());
+    c.commit(5.0, false);
+    CHECK(calls == 4);                     // loud and empty: retried
+    std::vector<float> quiet(24000, 0.0f);
+    c.push(quiet.data(), (int)quiet.size());
+    calls = 0;
+    c.commit(6.0, false);                  // silent window: one call, no retry
+    CHECK(calls == 1);
+    auto loud = loud_window(3.0, 0, 0);
+    c.push(loud.data(), (int)loud.size());
+    calls = 0;
+    c.commit(9.0, false);                  // loud again: a new stretch
+    CHECK(calls == 4);
+}
+
 int main() {
+    test_silent_window_resets_budget();
     test_split_once();
     test_retry_bound();
     test_split_min_part();

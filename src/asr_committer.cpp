@@ -69,7 +69,10 @@ std::vector<Word> AsrCommitter::transcribe_window(size_t span) {
         empty_until_ = -1.0;
         return words;
     }
-    if (!loud(window, 0, span)) return words;
+    if (!loud(window, 0, span)) {   // silence ends the empty stretch
+        empty_until_ = -1.0;
+        return words;
+    }
     if (empty_until_ > commit_sec_) {   // the previous window, over this audio, stayed empty
         empty_until_ = end_sec;
         return words;
