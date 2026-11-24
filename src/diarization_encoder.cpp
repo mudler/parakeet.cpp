@@ -88,14 +88,25 @@ ggml_tensor* DiarizationEncoder::build_blocks(ggml_context* ctx, ggml_tensor* x,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(ctx, ggml_cont(ctx, k), pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        v = ggml_cont(ctx, v);
 
-        // flash_attn_ext takes q/k/v as [hd, T, H] and returns [hd, H, T]
-        // (heads already interleaved per frame), which reshapes to [d, T].
-        q = ggml_permute(ctx, q, 0, 2, 1, 3);
-        k = ggml_permute(ctx, k, 0, 2, 1, 3);
-        v = ggml_permute(ctx, ggml_cont(ctx, v), 0, 2, 1, 3);
-        ggml_tensor* attn = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
-        attn = ggml_reshape_2d(ctx, ggml_cont(ctx, attn), d, T);
+        // [hd, H, T] -> packed [hd, T, H]. mul_mat broadcasts over the head dim.
+        q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+        k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
+        v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+
+        // Exact softmax attention, the same mul_mat + softmax the FastConformer
+        // encoder runs. The previous ggml flash-attn tile kernel faults on ROCm
+        // for this shape (RDNA4 / gfx1201, head dim 64, streaming chunk of 264
+        // with no mask). Streaming chunks stay a few hundred frames, so the
+        // explicit score matrix is small.
+        ggml_tensor* scores = ggml_mul_mat(ctx, k, q); // [T_k, T_q, H]
+        ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, /*mask=*/nullptr, scale, 0.0f);
+        ggml_tensor* vt = ggml_cont(ctx, ggml_permute(ctx, v, 1, 0, 2, 3)); // [T_k, hd, H]
+        ggml_tensor* ctxh = ggml_mul_mat(ctx, vt, probs);                    // [hd, T_q, H]
+        // [hd, H, T] packs each frame's heads into d consecutive values.
+        ggml_tensor* attn = ggml_cont(ctx, ggml_permute(ctx, ctxh, 0, 2, 1, 3));
+        attn = ggml_reshape_2d(ctx, attn, d, T);
         x = ggml_add(ctx, x, linear(ctx, ml_, attn, base + "attn.out_proj"));
 
         // Feed-forward: x = x + W2 gelu(W1 norm2(x))
