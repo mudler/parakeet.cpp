@@ -23,6 +23,8 @@ DiarizationEncoder::DiarizationEncoder(const ModelLoader& ml)
     pre_block_norm_     = cfg.pre_block_norm;
     rope_base_          = cfg.rope_base;
     ln_eps_             = 1e-5f;
+    qk_norm_            = cfg.qk_norm;
+    gelu_erf_           = cfg.activation == "gelu_erf";
 
     if (n_layers_ <= 0 || d_model_ <= 0 || n_heads_ <= 0 || subsampling_factor_ <= 0 ||
         d_model_ % n_heads_ != 0) {
@@ -84,9 +86,16 @@ ggml_tensor* DiarizationEncoder::build_blocks(ggml_context* ctx, ggml_tensor* x,
                                       (size_t)d * sizeof(float));
         ggml_tensor* v = ggml_view_3d(ctx, qkv, hd, H, T, hd * sizeof(float), row,
                                       (size_t)2 * d * sizeof(float));
-        q = ggml_rope_ext(ctx, ggml_cont(ctx, q), pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
+        q = ggml_cont(ctx, q);
+        k = ggml_cont(ctx, k);
+        if (qk_norm_) {
+            // Per-head LayerNorm (weight and bias, shared by all heads) before RoPE.
+            q = layer_norm(ctx, ml_, q, base + "attn.q_norm", ln_eps_);
+            k = layer_norm(ctx, ml_, k, base + "attn.k_norm", ln_eps_);
+        }
+        q = ggml_rope_ext(ctx, q, pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        k = ggml_rope_ext(ctx, ggml_cont(ctx, k), pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
+        k = ggml_rope_ext(ctx, k, pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
         // flash_attn_ext takes q/k/v as [hd, T, H] and returns [hd, H, T]
@@ -100,7 +109,8 @@ ggml_tensor* DiarizationEncoder::build_blocks(ggml_context* ctx, ggml_tensor* x,
 
         // Feed-forward: x = x + W2 gelu(W1 norm2(x))
         h = layer_norm(ctx, ml_, x, base + "norm2", ln_eps_);
-        h = ggml_gelu(ctx, linear(ctx, ml_, h, base + "ffn.net.0"));
+        h = linear(ctx, ml_, h, base + "ffn.net.0");
+        h = gelu_erf_ ? ggml_gelu_erf(ctx, h) : ggml_gelu(ctx, h);
         x = ggml_add(ctx, x, linear(ctx, ml_, h, base + "ffn.net.3"));
     }
     return layer_norm(ctx, ml_, x, "encoder.final_norm", ln_eps_);

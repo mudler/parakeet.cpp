@@ -312,6 +312,30 @@ bool ModelLoader::parse_config(const KvView& kv){
     cfg_.pre_block_norm = kv_bool(kv, "parakeet.encoder.pre_block_norm", true);
     cfg_.rope_base = kv_f32(kv, "parakeet.encoder.rope_base", 10000.0f);
     cfg_.rotary_fraction = kv_f32(kv, "parakeet.encoder.rotary_fraction", 1.0f);
+    cfg_.qk_norm = kv_bool(kv, "parakeet.encoder.qk_norm", false);
+    cfg_.activation = kv_str(kv, "parakeet.encoder.activation", "gelu");
+    if(cfg_.activation != "gelu" && cfg_.activation != "gelu_erf"){
+        PK_LOG("invalid GGUF: parakeet.encoder.activation '%s' is not 'gelu' or 'gelu_erf'", cfg_.activation.c_str());
+        return false;
+    }
+    // Speech-LLM audio side (arch "speechlm_audio"). Absent for every other model.
+    if(kv_bool(kv, "parakeet.speechlm.present", false)){
+        SpeechLmCfg& sl = cfg_.speechlm;
+        sl.present = true;
+        sl.llm_dim = kv_u32(kv, "parakeet.speechlm.llm_dim", 0);
+        sl.num_speakers = kv_u32(kv, "parakeet.speechlm.num_speakers", 0);
+        sl.activity_threshold = kv_f32(kv, "parakeet.speechlm.speaker_activity_threshold", 0.5f);
+        sl.chunk_len = (int32_t)kv_u32(kv, "parakeet.speechlm.chunk_len", 500);
+        sl.chunk_left_context = (int32_t)kv_u32(kv, "parakeet.speechlm.chunk_left_context", 50);
+        sl.chunk_right_context = (int32_t)kv_u32(kv, "parakeet.speechlm.chunk_right_context", 50);
+        if(sl.llm_dim==0 || sl.num_speakers==0 || sl.chunk_len<=0 ||
+           sl.chunk_left_context<0 || sl.chunk_right_context<0){
+            PK_LOG("invalid speechlm GGUF: llm_dim=%u num_speakers=%u chunk_len=%d left=%d right=%d",
+                   (unsigned)sl.llm_dim, (unsigned)sl.num_speakers, (int)sl.chunk_len,
+                   (int)sl.chunk_left_context, (int)sl.chunk_right_context);
+            return false;
+        }
+    }
     // Prompt conditioning (multilingual nemotron). Orthogonal capability flag;
     // absent -> present=false and the engine skips the prompt stage entirely.
     cfg_.prompt.present = kv_bool(kv, "parakeet.prompt.present", false);
@@ -487,7 +511,7 @@ bool ModelLoader::parse_config(const KvView& kv){
         nm += kv.prefix.size();
         ggml_tensor* t = ggml_get_tensor(ctx_, nm); if(t) tensors_[nm]=t; }
     // A VAD-only slice (arch "vad", see scripts/slice_vad_gguf.py) has no vocabulary.
-    return cfg_.d_model>0 && (cfg_.vocab_size>0 || cfg_.arch=="diarization" || cfg_.arch=="vad");
+    return cfg_.d_model>0 && (cfg_.vocab_size>0 || cfg_.arch=="diarization" || cfg_.arch=="vad" || cfg_.arch=="speechlm_audio");
 }
 ggml_tensor* ModelLoader::tensor(const std::string& n) const {
     auto it = tensors_.find(n); return it==tensors_.end()? nullptr : it->second;

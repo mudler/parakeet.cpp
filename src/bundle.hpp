@@ -21,6 +21,7 @@ constexpr const char* kBundleKindVad = "vad";   // Silero VAD, or a VAD-only sli
 constexpr const char* kBundleKindDiar = "diar";     // Nemotron diarization
 constexpr const char* kBundleKindCed = "ced";       // ced.cpp sound-event tagger
 constexpr const char* kBundleKindVoice = "voice";   // voice-detect.cpp speaker encoder
+constexpr const char* kBundleKindSpeechLmAudio = "speechlm_audio";   // audio side of a speech LLM (pairs with a diar component)
 
 struct BundleComponent {
     std::string name;
@@ -43,7 +44,7 @@ struct BundleInfo {
     const BundleComponent* find(const std::string& name) const;
 };
 
-// True for a kind this reader can describe (asr, vad, diar, ced, voice).
+// True for a kind this reader can describe (asr, vad, diar, ced, voice, speechlm_audio).
 bool bundle_kind_known(const std::string& kind);
 
 // True when the file is a GGUF whose general.architecture is "parakeet-bundle".

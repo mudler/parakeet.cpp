@@ -84,6 +84,18 @@ def write_diar(path, name="nvidia/Nemotron-3-Diarization"):
     w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
 
 
+def write_speechlm(path):
+    w = GGUFWriter(path, "parakeet")
+    w.add_string("general.name", "stand-in/speechlm-audio")
+    w.add_string("parakeet.arch", "speechlm_audio")
+    w.add_uint32("parakeet.encoder.d_model", 16)
+    w.add_bool("parakeet.speechlm.present", True)
+    w.add_uint32("parakeet.speechlm.llm_dim", 24)
+    rng = np.random.default_rng(7)
+    w.add_tensor("speechlm.proj.weight", rng.standard_normal((24, 16)).astype(np.float32))
+    w.write_header_to_file(); w.write_kv_data_to_file(); w.write_tensors_to_file(); w.close()
+
+
 def write_ced(path):
     w = GGUFWriter(path, "ced")
     w.add_string("general.name", "mispeech/ced-tiny")
@@ -213,6 +225,20 @@ def main():
         check(sorted(j2.get("components", {})) == ["asr", "ced", "diar", "vad", "voice"], "full list components")
         check({c: v["kind"] for c, v in j2.get("components", {}).items()} ==
               {"asr": "asr", "diar": "diar", "ced": "ced", "voice": "voice", "vad": "vad"}, "full list kinds")
+        # speechlm_audio: builds as its own kind, never as asr
+        write_speechlm("slm.gguf")
+        SLM_META = dict(DIAR_META, kind="speechlm_audio", source="nvidia/stand-in-speechlm", attribution="Stand-in by NVIDIA")
+        manifest("msl.json", [comp("audio", "slm.gguf", SLM_META), comp("diar", "diar.gguf", DIAR_META)])
+        rc, out, err = run("--out", "bsl.gguf", "--manifest", "msl.json")
+        check(rc == 0, f"speechlm_audio + diar bundle failed to build: {err}")
+        rc, out, err = run("--verify", "bsl.gguf", "--source", "audio=slm.gguf", "--source", "diar=diar.gguf")
+        check(rc == 0, f"verify of the speechlm_audio bundle failed: {err}")
+        manifest("msl2.json", [comp("audio", "slm.gguf", ASR_META)])
+        rc, out, err = run("--out", "bsl2.gguf", "--manifest", "msl2.json")
+        check(rc != 0 and "speechlm_audio" in err, "a speech LLM audio model as kind asr must be refused")
+        manifest("msl3.json", [comp("audio", "asr.gguf", SLM_META)])
+        rc, out, err = run("--out", "bsl3.gguf", "--manifest", "msl3.json")
+        check(rc != 0 and "speechlm_audio" in err, "an ASR model as kind speechlm_audio must be refused")
         # NOTICE: every component's credit and the full text of each distinct licence
         rc, out, err = run("--notice", "bf.gguf")
         check(rc == 0, f"notice failed: {err}")

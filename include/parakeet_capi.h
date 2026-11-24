@@ -89,6 +89,8 @@ typedef struct parakeet_ctx parakeet_ctx;
 //      parakeet_capi_stream_reset. Callers that stream cache-aware models see no
 //      change, but a caller that relied on stream_begin failing for a unified model
 //      must check parakeet_capi_stream_kind == PARAKEET_STREAM_KIND_BUFFERED.
+// Speech LLM audio embeddings (parakeet_capi_load_speechlm_audio, parakeet_capi_audio_embed_*,
+//      PARAKEET_MODEL_KIND_SPEECHLM_AUDIO; docs/speechlm-audio.md) are additive and keep ABI v10.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -847,7 +849,45 @@ const char* parakeet_capi_class_label(const parakeet_ctx* ctx, int index);
 #define PARAKEET_MODEL_KIND_SOUND       3
 #define PARAKEET_MODEL_KIND_SPEAKER     4
 #define PARAKEET_MODEL_KIND_VAD         5   // Silero VAD (additive; no ABI bump)
+#define PARAKEET_MODEL_KIND_SPEECHLM_AUDIO 6   // audio side of a speech LLM (additive; no ABI bump)
 int parakeet_capi_model_kind(const parakeet_ctx* ctx);
+
+// --- Speech LLM audio embeddings (additive; no ABI bump) -------------------
+//
+// The audio side of nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B (docs/speechlm-audio.md):
+// mel, the 32-layer ASR encoder, the Sortformer speaker branch, speaker fusion and the
+// adapter that projects into the LLM embedding space. The result is not a transcript: it is
+// one embedding row per 80 ms of audio, which a speech LLM takes as its audio tokens. The LLM
+// is not part of this library.
+//
+// Two GGUF models make one context: the audio model (made by
+// scripts/convert_nemotron_speechlm_audio.py, arch speechlm_audio) and the diarization model
+// beside it. Each is a standalone file (component NULL or ""), or a component of a bundle
+// GGUF (docs/bundle.md, kinds speechlm_audio and diar); both may be components of one bundle.
+// Returns NULL on failure, with the reason in parakeet_capi_load_error. Free with
+// parakeet_capi_free. The context is PARAKEET_MODEL_KIND_SPEECHLM_AUDIO: only the
+// parakeet_capi_audio_* calls work with it.
+parakeet_ctx* parakeet_capi_load_speechlm_audio(const char* audio_path, const char* audio_component,
+                                                const char* diar_path, const char* diar_component);
+
+// Width of one embedding row (the LLM hidden size, 2688 for Nemotron 3.5 Transcribe), or -1
+// when the context is not a speech LLM audio context.
+int parakeet_capi_audio_embed_dim(const parakeet_ctx* ctx);
+
+// Embeds mono float PCM. `sample_rate` is any positive rate; the audio is resampled to 16 kHz
+// when it is not 16 kHz. On success returns 0, sets *out_embeddings to a malloc'd row-major
+// array of *out_n_tokens x *out_dim floats (free it with parakeet_capi_free_floats), where
+// *out_n_tokens = ceil(floor(n_16k_samples / 160) / 8) and *out_dim = parakeet_capi_audio_embed_dim.
+// Audio shorter than one 10 ms frame gives 0 tokens and a NULL array. A long recording is
+// encoded in windows, so memory grows with the output only. Returns non-zero on error (reason
+// in parakeet_capi_last_error), leaving the outputs zeroed.
+int parakeet_capi_audio_embed_pcm(parakeet_ctx* ctx, const float* samples, int n_samples,
+                                  int sample_rate, float** out_embeddings, int* out_n_tokens,
+                                  int* out_dim);
+
+// The same for an audio file (any format audio_io reads, resampled to 16 kHz mono).
+int parakeet_capi_audio_embed_path(parakeet_ctx* ctx, const char* audio_path,
+                                   float** out_embeddings, int* out_n_tokens, int* out_dim);
 
 // --- Combined scene stream (ABI v8) -----------------------------------------
 // ASR, diarization and sound-event tagging over one live 16 kHz mono PCM

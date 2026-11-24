@@ -123,6 +123,36 @@ void trim_mel_frames(std::vector<float>& feats, int n_mels, int& T, int keep) {
     T = keep;
 }
 
+void normalize_per_feature(std::vector<float>& feats, int n_mels, int T, int valid) {
+    // Per mel-bin (row): mean over the first `valid` frames, unbiased std
+    // (ddof=1), std += CONSTANT, then (x - mean) / std. Frames >= valid are
+    // zeroed (valid_mask). B=1.
+    if (T <= 0) return;
+    valid = std::min(valid, T);
+    for (int m = 0; m < n_mels; ++m) {
+        float* row = &feats[(size_t)m * T];
+        double mean = 0.0;
+        if (valid > 0) {
+            for (int t = 0; t < valid; ++t) mean += row[t];
+            mean /= (double)valid;
+        }
+        double var = 0.0;
+        if (valid > 1) {
+            for (int t = 0; t < valid; ++t) {
+                const double d = (double)row[t] - mean;
+                var += d * d;
+            }
+            var /= (double)(valid - 1); // unbiased (ddof=1)
+        }
+        double sd = std::sqrt(var); // NaN-guard not needed: valid>1 here
+        sd += kNormEps;
+        for (int t = 0; t < T; ++t) {
+            if (t < valid) row[t] = (float)(((double)row[t] - mean) / sd);
+            else           row[t] = 0.0f; // masked beyond valid
+        }
+    }
+}
+
 void MelFrontend::compute(const std::vector<float>& samples,
                           std::vector<float>& feats, int& n_mels, int& T) const {
     if (samples.empty()) { n_mels = k_.n_mels_; T = 0; feats.clear(); return; }
@@ -179,31 +209,7 @@ void MelFrontend::compute(const std::vector<float>& samples,
     // Per mel-bin (row): mean over the first `seq_len` frames, unbiased std
     // (ddof=1), std += CONSTANT, then (x - mean) / std. Frames >= seq_len are
     // zeroed (valid_mask). B=1.
-    if (k_.per_feature_ && T > 0) {
-        const int valid = std::min(seq_len, T);
-        for (int m = 0; m < n_mels_; ++m) {
-            float* row = &feats[(size_t)m * T];
-            double mean = 0.0;
-            if (valid > 0) {
-                for (int t = 0; t < valid; ++t) mean += row[t];
-                mean /= (double)valid;
-            }
-            double var = 0.0;
-            if (valid > 1) {
-                for (int t = 0; t < valid; ++t) {
-                    const double d = (double)row[t] - mean;
-                    var += d * d;
-                }
-                var /= (double)(valid - 1); // unbiased (ddof=1)
-            }
-            double sd = std::sqrt(var); // NaN-guard not needed: valid>1 here
-            sd += kNormEps;
-            for (int t = 0; t < T; ++t) {
-                if (t < valid) row[t] = (float)(((double)row[t] - mean) / sd);
-                else           row[t] = 0.0f; // masked beyond seq_len
-            }
-        }
-    }
+    if (k_.per_feature_ && T > 0) normalize_per_feature(feats, n_mels_, T, std::min(seq_len, T));
     // Unified checkpoints: NeMo's encoder never sees the frames past seq_len.
     if (k_.valid_length_ && seq_len < T) trim_mel_frames(feats, n_mels_, T, seq_len);
 }
