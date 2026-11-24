@@ -144,6 +144,8 @@ set(PARAKEET_SRC
     src/rnnt.cpp
     src/transducer_batch.cpp
     src/tokenizer.cpp
+    src/bpe_tokenizer.cpp
+    src/unicode_props.cpp
     src/search.cpp
     src/transcription.cpp
     src/diarization.cpp
