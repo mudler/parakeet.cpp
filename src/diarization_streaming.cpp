@@ -94,10 +94,13 @@ StreamingDiarization::StreamingDiarization(const ModelLoader& ml, const DiarStre
     }
 
     if (d.use_learnable_sil_emb) {
+        // Realize first: it frees the host ggml context, so a tensor pointer
+        // looked up before this call would dangle. After it, tensor() returns
+        // the device-resident tensor.
+        ensure_weights_realized(ml);
         const ggml_tensor* t = ml.tensor("sortformer_modules.learnable_sil_emb");
         if (!t || t->type != GGML_TYPE_F32 || ggml_nelements(t) != d_model_)
             throw std::runtime_error("parakeet: learnable_sil_emb missing or not F32");
-        ensure_weights_realized(ml);
         learnable_sil_emb_.resize(d_model_);
         ggml_backend_tensor_get(t, learnable_sil_emb_.data(), 0, d_model_ * sizeof(float));
         use_learnable_sil_emb_ = true;
