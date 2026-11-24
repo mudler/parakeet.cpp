@@ -13,7 +13,7 @@ namespace pk {
 // strip only ever touches byte 0 of the whole string), so appending the fragment
 // for the newly emitted tokens yields a transcript byte-identical to
 // detokenize(all non-special tokens) — without rebuilding it every chunk.
-static std::string detok_fragment(const std::vector<std::string>& pieces,
+std::string detok_fragment(const std::vector<std::string>& pieces,
                                   const std::vector<int32_t>& ids,
                                   size_t from, size_t to) {
     std::string cat;

@@ -1,5 +1,6 @@
 #include "transcription.hpp"
 #include "tokenizer.hpp"
+#include "streaming.hpp"
 
 #include <cstdio>
 #include <string>
@@ -137,6 +138,32 @@ int main() {
         { M + "hello", M + "world", "ish" },
         { 0, 1, 2 },      // ▁hello ▁world ish
     });
+
+    // Incremental text == detokenize(all), for every way of cutting the token
+    // stream into chunks (what StreamingSession::process_emitted relies on).
+    {
+        std::vector<std::string> pieces = { M + "the", M + "and", M + "'", "in", "'", M + "x", "yz", "." };
+        std::vector<int32_t> ids = { 0, 1, 2, 3, 4, 5, 6, 7, 5, 6 };
+        const std::string want = pk::detokenize(pieces, ids);
+        for (size_t cut = 1; cut < ids.size(); ++cut) {
+            for (size_t cut2 = cut; cut2 <= ids.size(); ++cut2) {
+                std::string text;
+                size_t prev = 0;
+                for (size_t end : {cut, cut2, ids.size()}) {
+                    if (end == prev) continue;
+                    std::string d = pk::detok_fragment(pieces, ids, prev, end);
+                    if (prev == 0 && !d.empty() && d[0] == ' ') d.erase(0, 1);
+                    text += d;
+                    prev = end;
+                }
+                if (text != want) {
+                    std::fprintf(stderr, "incremental text mismatch at cuts %zu,%zu: '%s' vs '%s'\n",
+                                 cut, cut2, text.c_str(), want.c_str());
+                    ++failures;
+                }
+            }
+        }
+    }
 
     if (failures) {
         std::fprintf(stderr, "test_streaming_word_grouping: %d scenario(s) FAILED\n",

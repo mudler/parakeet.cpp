@@ -228,4 +228,11 @@ void run_stream_over_pcm(
         = nullptr,
     const std::string& target_lang = "");
 
+// Text of ids[from, to) without detokenize()'s leading-space strip, so it can
+// be appended to a running transcript. Used by StreamingSession to build the
+// text incrementally; exposed for the model-free equivalence test.
+std::string detok_fragment(const std::vector<std::string>& pieces,
+                           const std::vector<int32_t>& ids,
+                           size_t from, size_t to);
+
 } // namespace pk
