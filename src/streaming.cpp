@@ -37,6 +37,86 @@ std::string detok_fragment(const std::vector<std::string>& pieces,
     return out;
 }
 
+size_t append_stream_chunk(const std::vector<std::string>& pieces,
+                           const std::vector<int32_t>& emitted,
+                           const std::vector<TokenInfo>& chunk_tokens,
+                           int base_frame, int eou_id, int eob_id,
+                           StreamTextState& st, std::string& text,
+                           std::vector<TokenInfo>& word_tokens) {
+    static const std::string META = "\xe2\x96\x81";
+    size_t taken = 0;
+    for (size_t i = 0; i < emitted.size(); ++i) {
+        const int32_t id = emitted[i];
+        if (id == eou_id || id == eob_id) continue;
+        ++taken;
+        TokenInfo ti = chunk_tokens[i];
+        ti.frame += base_frame;  // local -> absolute encoder frame
+        word_tokens.push_back(ti);
+
+        if (id < 0 || (size_t)id >= pieces.size()) continue;
+        const std::string& piece = pieces[(size_t)id];
+        if (is_special_piece(piece)) {
+            if (st.ends_meta) st.drop_meta = true;
+            continue;
+        }
+        std::string frag = detok_fragment(pieces, emitted, i, i + 1);
+        if (!frag.empty() && frag[0] == ' ' && (st.drop_meta || !st.started)) frag.erase(0, 1);
+        text += frag;
+        st.started = true;
+        st.drop_meta = false;
+        st.ends_meta = piece.size() >= META.size() &&
+                       piece.compare(piece.size() - META.size(), META.size(), META) == 0;
+    }
+    return taken;
+}
+
+size_t regroup_stream_words(const std::vector<TokenInfo>& word_tokens,
+                            const std::vector<std::string>& pieces,
+                            float frame_sec, bool flush_all,
+                            std::vector<Word>& final_words, size_t& cursor,
+                            std::vector<Word>& words, size_t& finalized) {
+    // Re-group ONLY the still-open tail [cursor, end) instead of the whole
+    // session every chunk. Tokens before cursor are already grouped into
+    // final_words and can never change: group_words splits at `▁` word-starts
+    // and its only cross-token effects (the one-token forward lookahead and the
+    // backward punctuation attach) never cross a `▁`-word-start boundary — a
+    // word-start is never punctuation, and the tail's first token opens a word so
+    // no later punct attaches backwards past it. Hence
+    //   group_words([0,cursor)) ++ group_words([cursor,end)) == group_words([0,end))
+    // and final_words ++ tail == the full grouping, byte-for-byte. The last tail
+    // word stays "open" mid-stream (its text/end can still change); flush_all
+    // makes every word final at end-of-stream.
+    const size_t end = word_tokens.size();
+    std::vector<TokenInfo> tail(word_tokens.begin() + (std::ptrdiff_t)cursor,
+                                word_tokens.begin() + (std::ptrdiff_t)end);
+    std::vector<Word> tail_words = group_words(tail, pieces, frame_sec);
+
+    if (flush_all) {
+        for (const Word& w : tail_words) final_words.push_back(w);
+        cursor = word_tokens.size();
+        words = final_words;
+        finalized = words.size();
+    } else {
+        // Move all tail words but the last into final_words and advance the
+        // cursor to the start of the open (trailing) word. The boundary MUST use
+        // group_words' own word-start rule (open_word_start), not "piece starts
+        // with `▁`": a `▁`-prefixed punctuation piece like `▁'` starts with `▁`
+        // yet does not open a word, so scanning for `▁` alone would land the
+        // cursor past the real word start and drop that word from every future
+        // tail (and thus from drain_words()/--timestamps/--json).
+        if (tail_words.size() > 1) {
+            size_t open_rel = open_word_start(tail, pieces);
+            for (size_t i = 0; i + 1 < tail_words.size(); ++i)
+                final_words.push_back(tail_words[i]);
+            cursor += open_rel;
+        }
+        words = final_words;
+        if (!tail_words.empty()) words.push_back(tail_words.back());
+        finalized = words.empty() ? 0 : words.size() - 1;
+    }
+    return tail.size();
+}
+
 StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& target_lang)
     : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml) {
     const ParakeetConfig& cfg = ml.config();
@@ -85,7 +165,7 @@ void StreamingSession::reset() {
     state_ = rnnt_decode_init(pred_);
     // eou_id_/eob_id_/frame_sec_ are resolved once in the constructor.
     enc_frame_ = 0;
-    non_special_.clear();
+    text_state_ = StreamTextState();
     text_.clear();
     text_taken_ = 0;
     last_chunk_had_eou_ = false;
@@ -98,14 +178,8 @@ void StreamingSession::reset() {
     words_taken_ = 0;
 }
 
-bool StreamingSession::is_special_id(int32_t tok) const {
-    const auto& pieces = ml_.config().tokenizer_pieces;
-    return tok >= 0 && (size_t)tok < pieces.size() && is_special_piece(pieces[(size_t)tok]);
-}
-
 void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
     last_chunk_had_eou_ = false;
-    const size_t ns_before = non_special_.size();
     for (int32_t tok : emitted) {
         if (tok == eou_id_ || tok == eob_id_) {
             // EOU/EOB: surface as an event, do NOT add to the text.
@@ -119,19 +193,7 @@ void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
             ev.time_sec = ev.encoder_frame * frame_sec_;
             events_.push_back(ev);
             last_chunk_had_eou_ = true;
-        } else if (!is_special_id(tok)) {  // language tags such as <en-US> are not text
-            non_special_.push_back(tok);
         }
-    }
-    // Append ONLY the newly emitted tokens' text to the running transcript
-    // (detokenize is prefix-stable), instead of re-detokenizing the whole session
-    // history every chunk.
-    if (non_special_.size() > ns_before) {
-        std::string delta = detok_fragment(ml_.config().tokenizer_pieces,
-                                            non_special_, ns_before, non_special_.size());
-        if (ns_before == 0 && !delta.empty() && delta[0] == ' ') delta.erase(0, 1);
-        text_ += delta;
-        reprocess_this_chunk_ += (non_special_.size() - ns_before);
     }
 }
 
@@ -185,8 +247,7 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     //    from the per-token local frame the decoder reported.
     const size_t prev_events = events_.size();
     process_emitted(emitted);
-    // Re-walk emitted to assign the correct absolute frame to each new event,
-    // and accumulate NON-special tokens (absolute frame) for word grouping.
+    // Re-walk emitted to assign the correct absolute frame to each new event.
     size_t evi = prev_events;
     for (size_t i = 0; i < emitted.size(); ++i) {
         if (emitted[i] == eou_id_ || emitted[i] == eob_id_) {
@@ -194,12 +255,15 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
             events_[evi].encoder_frame = abs_frame;
             events_[evi].time_sec = abs_frame * frame_sec_;
             ++evi;
-        } else if (!is_special_id(emitted[i])) {
-            TokenInfo ti = chunk_tokens[i];
-            ti.frame += base_frame;  // local -> absolute encoder frame
-            word_tokens_.push_back(ti);
         }
     }
+    // Append the new tokens' text to the running transcript (detokenize is
+    // prefix-stable) instead of re-detokenizing the session history every chunk,
+    // and accumulate the word tokens (absolute frame) for word grouping. EOU/EOB
+    // are events; language tags add no text and no word (group_words drops them).
+    reprocess_this_chunk_ += append_stream_chunk(
+        ml_.config().tokenizer_pieces, emitted, chunk_tokens, base_frame,
+        eou_id_, eob_id_, text_state_, text_, word_tokens_);
     // Regroup the accumulated tokens; words before the last (still-open) one are
     // final and become available to drain_words().
     regroup_words(/*flush_all=*/false);
@@ -248,46 +312,9 @@ std::string StreamingSession::finalize() {
 }
 
 void StreamingSession::regroup_words(bool flush_all) {
-    // Re-group ONLY the still-open tail [wt_cursor_, end) instead of the whole
-    // session every chunk. Tokens before wt_cursor_ are already grouped into
-    // final_words_ and can never change: group_words splits at `▁` word-starts
-    // and its only cross-token effects (the one-token forward lookahead and the
-    // backward punctuation attach) never cross a `▁`-word-start boundary — a
-    // word-start is never punctuation, and the tail's first token opens a word so
-    // no later punct attaches backwards past it. Hence
-    //   group_words([0,cursor)) ++ group_words([cursor,end)) == group_words([0,end))
-    // and final_words_ ++ tail == the full grouping, byte-for-byte. The last tail
-    // word stays "open" mid-stream (its text/end can still change); flush_all
-    // makes every word final at end-of-stream.
-    const auto& pieces = ml_.config().tokenizer_pieces;
-    std::vector<TokenInfo> tail(word_tokens_.begin() + (std::ptrdiff_t)wt_cursor_,
-                                word_tokens_.end());
-    std::vector<Word> tail_words = group_words(tail, pieces, frame_sec_f_);
-    reprocess_this_chunk_ += tail.size();
-
-    if (flush_all) {
-        for (const Word& w : tail_words) final_words_.push_back(w);
-        wt_cursor_ = word_tokens_.size();
-        words_ = final_words_;
-        words_finalized_ = words_.size();
-    } else {
-        // Move all tail words but the last into final_words_ and advance the
-        // cursor to the start of the open (trailing) word. The boundary MUST use
-        // group_words' own word-start rule (open_word_start), not "piece starts
-        // with `▁`": a `▁`-prefixed punctuation piece like `▁'` starts with `▁`
-        // yet does not open a word, so scanning for `▁` alone would land the
-        // cursor past the real word start and drop that word from every future
-        // tail (and thus from drain_words()/--timestamps/--json).
-        if (tail_words.size() > 1) {
-            size_t open_rel = open_word_start(tail, pieces);
-            for (size_t i = 0; i + 1 < tail_words.size(); ++i)
-                final_words_.push_back(tail_words[i]);
-            wt_cursor_ += open_rel;
-        }
-        words_ = final_words_;
-        if (!tail_words.empty()) words_.push_back(tail_words.back());
-        words_finalized_ = words_.empty() ? 0 : words_.size() - 1;
-    }
+    reprocess_this_chunk_ += regroup_stream_words(
+        word_tokens_, ml_.config().tokenizer_pieces, frame_sec_f_, flush_all,
+        final_words_, wt_cursor_, words_, words_finalized_);
     // Never "un-finalize" a word we've already handed out.
     if (words_finalized_ < words_taken_) words_finalized_ = words_taken_;
 }

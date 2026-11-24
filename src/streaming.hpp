@@ -31,6 +31,42 @@ struct EouEvent {
     double  time_sec = 0.0;        // encoder_frame * hop * subsampling / sample_rate
 };
 
+// Text state carried across the chunks of one stream (see append_stream_chunk).
+struct StreamTextState {
+    bool started = false;    // a non-special piece was already appended
+    bool ends_meta = false;  // the last non-special piece ended with `▁`
+    bool drop_meta = false;  // a special piece followed it: next `▁` is redundant
+};
+
+// The text and word-token bookkeeping of one streamed chunk, apart from the
+// model so a test can drive it. For every emitted id except <EOU>/<EOB> (those
+// are events): the matching TokenInfo, moved to absolute frames by `base_frame`,
+// goes to `word_tokens`, and its text is appended to `text`. A special piece such
+// as a language tag adds no text, and a `▁` piece that ends the text before it
+// drops the leading `▁` of the next piece, so the pair gives one space (the text
+// only ever grows, so the first space cannot be taken back). Without special
+// pieces `text` equals detokenize() of the ids. group_words() drops tags and that
+// `▁` from the words the same way as offline. `chunk_tokens[i]` describes
+// `emitted[i]`; its frame is local to the chunk. Returns the number of ids taken.
+size_t append_stream_chunk(const std::vector<std::string>& pieces,
+                           const std::vector<int32_t>& emitted,
+                           const std::vector<TokenInfo>& chunk_tokens,
+                           int base_frame, int eou_id, int eob_id,
+                           StreamTextState& st, std::string& text,
+                           std::vector<TokenInfo>& word_tokens);
+
+// Group the still-open tail of `word_tokens` (from `cursor`) into `words` after
+// final_words, as StreamingSession::regroup_words does after each chunk. Moves
+// the words that can no longer change into `final_words` and advances `cursor`;
+// `flush_all` (end of stream) makes every word final. `words` becomes
+// final_words plus the open word, `finalized` the count of its final words.
+// Returns the number of tokens grouped.
+size_t regroup_stream_words(const std::vector<TokenInfo>& word_tokens,
+                            const std::vector<std::string>& pieces,
+                            float frame_sec, bool flush_all,
+                            std::vector<Word>& final_words, size_t& cursor,
+                            std::vector<Word>& words, size_t& finalized);
+
 // Cache-aware streaming RNN-T session for the pure-RNNT streaming model
 // nvidia/parakeet_realtime_eou_120m-v1.
 //
@@ -145,10 +181,6 @@ private:
     // brand-new EOU/EOB events found beyond events_seen_tokens_.
     void process_emitted(const std::vector<int32_t>& emitted);
 
-    // True for a bracketed special piece other than EOU/EOB, such as the
-    // language tag a prompt-conditioned model emits; it is never text.
-    bool is_special_id(int32_t tok) const;
-
     const ModelLoader& ml_;
     StreamingEncoder enc_;
     PredictionNet pred_;
@@ -167,7 +199,7 @@ private:
     int enc_frame_ = 0;            // running encoder-output frame counter
 
     // Running stripped transcript + delta marker.
-    std::vector<int32_t> non_special_;  // non-special tokens, for detokenize
+    StreamTextState text_state_;
     std::string text_;
     size_t text_taken_ = 0;        // byte offset of text_ already returned
 

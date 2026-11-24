@@ -148,7 +148,7 @@ tests/               ctest targets
                        test_streaming_encoder.cpp, cache-aware streaming encoder == offline + NeMo
                        test_streaming_decode.cpp , streaming RNN-T tokens == NeMo cache-aware streaming
                        test_streaming_eou_reset.cpp, multi-utterance streaming: decoder resets on <EOU>, transcript == NeMo reset-on-EOU (issue #13; PARAKEET_TEST_BASELINE_EOU_RESET)
-                       test_stream_special_pieces.cpp, language tags and the `▁` before them stay out of streamed text and word timestamps (model-independent)
+                       test_stream_special_pieces.cpp, language tags and the `▁` before them stay out of streamed text and word timestamps; plain text unchanged (model-independent)
                        test_capi_stream.cpp    , streaming C-API transcript == NeMo streaming (PARAKEET_TEST_BASELINE_EOU_STREAM)
                        test_diarization_accuracy.cpp, offline diarization == NeMo (PARAKEET_TEST_BASELINE_DIAR)
                        test_streaming_diarization.cpp, streaming diarization == NeMo streaming, every latency mode (same baseline)

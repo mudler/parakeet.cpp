@@ -16,8 +16,7 @@ std::string detokenize(const std::vector<std::string>& pieces,
         }
     }
 
-    // Step 2: replace every occurrence of META_SPACE (▁) with a regular space, but
-    // never two in a row (a lone ▁ before a stripped language tag would double it).
+    // Step 2: replace every occurrence of META_SPACE (▁) with a regular space.
     std::string out;
     out.reserve(result.size());
     for (size_t i = 0; i < result.size(); ) {
@@ -26,9 +25,7 @@ std::string detokenize(const std::vector<std::string>& pieces,
             (unsigned char)result[i]   == 0xE2 &&
             (unsigned char)result[i+1] == 0x96 &&
             (unsigned char)result[i+2] == 0x81) {
-            if (out.empty() || out.back() != ' ') {
-                out += ' ';
-            }
+            out += ' ';
             i += META_SPACE_LEN;
         } else {
             out += result[i++];
@@ -55,6 +52,12 @@ std::vector<int32_t> strip_special_tokens(const std::vector<std::string>& pieces
     for (int32_t id : ids) {
         if (id >= 0 && (size_t)id < pieces.size()) {
             if (is_special_piece(pieces[(size_t)id])) {
+                // The model emits a lone `▁` before a language tag; with the tag
+                // gone it would leave a doubled space, so drop it too.
+                if (!out.empty() && (size_t)out.back() < pieces.size() &&
+                    pieces[(size_t)out.back()] == META_SPACE) {
+                    out.pop_back();
+                }
                 continue;
             }
         }

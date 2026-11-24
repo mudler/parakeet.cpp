@@ -91,25 +91,40 @@ std::set<std::string> extract_punctuation(const std::vector<std::string>& pieces
 
 } // namespace
 
-std::vector<Word> group_words(const std::vector<TokenInfo>& tokens_in,
-                              const std::vector<std::string>& pieces,
-                              float frame_sec) {
-    // Language tags such as <en-US> are not words. The model emits a bare `▁`
-    // piece before each tag, which would otherwise become an empty word.
+// Drop special pieces (language tags) and the lone `▁` piece before each one.
+// `src`, when given, receives for every kept token its index in `tokens_in`.
+static std::vector<TokenInfo> without_special_tokens(const std::vector<TokenInfo>& tokens_in,
+                                                     const std::vector<std::string>& pieces,
+                                                     std::vector<size_t>* src) {
     auto piece_at = [&](const TokenInfo& t) -> const std::string* {
         return t.id >= 0 && (size_t)t.id < pieces.size() ? &pieces[(size_t)t.id] : nullptr;
     };
     std::vector<TokenInfo> tokens;
     tokens.reserve(tokens_in.size());
-    for (const TokenInfo& t : tokens_in) {
+    if (src) src->clear();
+    for (size_t i = 0; i < tokens_in.size(); ++i) {
+        const TokenInfo& t = tokens_in[i];
         const std::string* pc = piece_at(t);
         if (pc && is_special_piece(*pc)) {
             const std::string* prev = tokens.empty() ? nullptr : piece_at(tokens.back());
-            if (prev && *prev == META_SPACE) tokens.pop_back();
+            if (prev && *prev == META_SPACE) {
+                tokens.pop_back();
+                if (src) src->pop_back();
+            }
             continue;
         }
         tokens.push_back(t);
+        if (src) src->push_back(i);
     }
+    return tokens;
+}
+
+std::vector<Word> group_words(const std::vector<TokenInfo>& tokens_in,
+                              const std::vector<std::string>& pieces,
+                              float frame_sec) {
+    // Language tags such as <en-US> are not words, nor is the bare `▁` piece the
+    // model emits before each one.
+    const std::vector<TokenInfo> tokens = without_special_tokens(tokens_in, pieces, nullptr);
     std::vector<Word> words;
     const int n = (int)tokens.size();
     if (n == 0) return words;
@@ -375,12 +390,16 @@ size_t open_word_start(const std::vector<TokenInfo>& tokens,
     auto is_punct = [&](const std::string& s) {
         return !s.empty() && s != DELIM && punct.count(s) > 0;
     };
-    for (size_t i = tokens.size(); i-- > 0;) {
-        int id = tokens[i].id;
+    // Language tags and the `▁` before them are not words (see group_words), so
+    // look past them; the index returned is into `tokens`.
+    std::vector<size_t> src;
+    const std::vector<TokenInfo> kept = without_special_tokens(tokens, pieces, &src);
+    for (size_t i = kept.size(); i-- > 0;) {
+        int id = kept[i].id;
         if (id < 0 || (size_t)id >= pieces.size()) continue;
         const std::string& piece = pieces[(size_t)id];
         const std::string text = piece_to_text(piece);
-        if (piece != text && text != DELIM && !is_punct(text)) return i;
+        if (piece != text && text != DELIM && !is_punct(text)) return src[i];
     }
     return 0;
 }
