@@ -15,6 +15,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+#include "ggml.h"
+#include "gguf.h"
 #include <vector>
 
 static int failures = 0;
@@ -25,7 +28,25 @@ static const char* env(const char* k, const char* d = nullptr) {
     return (v && *v) ? v : d;
 }
 
+// The generic loader must refuse the audio side of a speech LLM (no decoder) with a clear error.
+static void check_generic_load_rejects_speechlm() {
+    gguf_context* g = gguf_init_empty();
+    gguf_set_val_str(g, "general.architecture", "parakeet");
+    gguf_set_val_str(g, "parakeet.arch", "speechlm_audio");
+    gguf_set_val_u32(g, "parakeet.encoder.d_model", 8);
+    const char* td = std::getenv("TMPDIR");
+    const std::string path = std::string(td && *td ? td : ".") + "/pk_speechlm_synthetic.gguf";
+    const bool wrote = gguf_write_to_file(g, path.c_str(), false);
+    gguf_free(g);
+    CHECK(wrote);
+    if (!wrote) return;
+    CHECK(parakeet_capi_load(path.c_str()) == nullptr);
+    CHECK(std::strlen(parakeet_capi_load_error()) > 0);
+    std::remove(path.c_str());
+}
+
 int main() {
+    check_generic_load_rejects_speechlm();
     // --- no model needed ---
     CHECK(parakeet_capi_load_speechlm_audio(nullptr, nullptr, "d.gguf", nullptr) == nullptr);
     CHECK(std::strlen(parakeet_capi_load_error()) > 0);

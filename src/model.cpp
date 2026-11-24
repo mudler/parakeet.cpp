@@ -57,6 +57,12 @@ std::unique_ptr<Model> Model::load(const std::string& gguf_path, const std::stri
                "use it with `parakeet-cli vad` or the parakeet_capi_vad_* functions", gguf_path.c_str());
         return nullptr;
     }
+    // The audio side of a speech LLM has an encoder but no decoder; it cannot transcribe.
+    if (m->loader_.config().arch == "speechlm_audio") {
+        PK_LOG("%s is the audio side of a speech LLM: it has no decoder, so it cannot transcribe; "
+               "open it with parakeet_capi_load_speechlm_audio", gguf_path.c_str());
+        return nullptr;
+    }
     // Model is the ASR entry point — reject diarization models so the C-API
     // can fall through to DiarizationModel::load.
     if (m->loader_.config().arch == "diarization") {

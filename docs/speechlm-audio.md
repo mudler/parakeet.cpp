@@ -107,7 +107,7 @@ Known differences:
 * **Ill-conditioned input.** The repository's 2 s `clip.wav` fixture gave an encoder difference
   of 1e-3 and a speaker difference of 1e-2, against 5e-5 and 1e-6 on speech. The cause was not
   investigated; real speech is the target.
-* **Quantisation.** On the same clips F16 gives encoder differences of 2.1e-3 (7.4 s) and 1.1e-2
+* **Quantisation (`q8_0` is experimental).** On the same clips F16 gives encoder differences of 2.1e-3 (7.4 s) and 1.1e-2
   (62 s), adapter 5.7e-4 and 1.1e-2; Q8_0 gives 7.8e-2 and 2.5e-1 (encoder) and 2.6e-2 and 2.1e-1
   (adapter). Mean differences are 6e-5 (F16) and 3e-3 (Q8_0). Whether that costs transcript quality
   can only be judged with the language model.

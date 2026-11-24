@@ -18,7 +18,8 @@ in one bundle GGUF (docs/bundle.md) as components of kind speechlm_audio and dia
   convert_nemotron_speechlm_audio.py --safetensors model.safetensors --config config.json --output-dir out/
   convert_nemotron_speechlm_audio.py --hf nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B --output-dir out/
 
---dtype f16 / q8_0 stores the large linear weights in that type; norms, biases, the QK
+--dtype f16 / q8_0 stores the large linear weights in that type (q8_0 is experimental: see
+docs/speechlm-audio.md); norms, biases, the QK
 norms and the mel constants stay F32.
 """
 import argparse
@@ -28,6 +29,8 @@ import os
 import re
 import struct
 import sys
+import time
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -49,6 +52,27 @@ QUANTIZABLE = [re.compile(p) for p in (
 )]
 
 
+HTTP_TIMEOUT = 60   # seconds, per attempt
+HTTP_TRIES = 4
+
+
+def http_get(url, headers=None):
+    """GET `url` with a timeout and a few retries (back-off 2, 4, 8 s); exit with a clear message."""
+    last = None
+    for attempt in range(1, HTTP_TRIES + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers or {})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+                return r.read()
+        except (urllib.error.URLError, OSError, TimeoutError) as e:  # HTTPError is a URLError
+            last = e
+            if attempt < HTTP_TRIES:
+                print(f"warning: request failed ({e}); retry {attempt}/{HTTP_TRIES - 1}", file=sys.stderr)
+                time.sleep(2 ** attempt)
+    sys.exit(f"error: could not read {url} {headers or ''} after {HTTP_TRIES} attempts "
+             f"(timeout {HTTP_TIMEOUT} s each): {last}")
+
+
 class Source:
     """Reads tensors of a safetensors file, locally or over HTTP ranges."""
 
@@ -64,9 +88,7 @@ class Source:
             with open(self.path, "rb") as f:
                 f.seek(off)
                 return f.read(n)
-        req = urllib.request.Request(self.url, headers={"Range": f"bytes={off}-{off + n - 1}"})
-        with urllib.request.urlopen(req) as r:
-            return r.read()
+        return http_get(self.url, {"Range": f"bytes={off}-{off + n - 1}"})
 
     def names(self, prefix):
         return sorted(k for k in self.header if k != "__metadata__" and k.startswith(prefix))
@@ -161,7 +183,9 @@ def main():
     ap.add_argument("--config", help="config.json (default: fetched from --hf, required with --safetensors)")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--name", default="nemotron-3.5-transcribe-30b-a4b")
-    ap.add_argument("--dtype", choices=["f32", "f16", "q8_0"], default="f32")
+    ap.add_argument("--dtype", choices=["f32", "f16", "q8_0"], default="f32",
+                    help="storage type of the large linear weights. q8_0 is EXPERIMENTAL: the adapter output "
+                         "differs by up to 0.21 on a 62 s clip and the effect on transcripts is not measured")
     args = ap.parse_args()
 
     if args.safetensors:
@@ -172,7 +196,7 @@ def main():
     else:
         base = f"https://huggingface.co/{args.hf}/resolve/main/"
         st = Source(url=base + "model.safetensors")
-        cfg = json.load(open(args.config)) if args.config else json.loads(urllib.request.urlopen(base + "config.json").read())
+        cfg = json.load(open(args.config)) if args.config else json.loads(http_get(base + "config.json"))
 
     pe = cfg["pe_encoder_config"]
     asr = pe["asr_encoder_cfg"]

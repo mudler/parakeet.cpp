@@ -881,6 +881,12 @@ int parakeet_capi_audio_embed_dim(const parakeet_ctx* ctx);
 // Audio shorter than one 10 ms frame gives 0 tokens and a NULL array. A long recording is
 // encoded in windows, so memory grows with the output only. Returns non-zero on error (reason
 // in parakeet_capi_last_error), leaving the outputs zeroed.
+//
+// Thread safety: NOT safe to call concurrently on one context. The embedding pass reuses
+// scratch buffers inside the context (the log-mel frontend) and writes last_error without a
+// lock, although the C++ method is const. Serialise the calls on one context, or use one
+// context per thread (each loads its own copy of the weights). Calls on different contexts are
+// independent. The context has no parakeet_capi_set_concurrency pool.
 int parakeet_capi_audio_embed_pcm(parakeet_ctx* ctx, const float* samples, int n_samples,
                                   int sample_rate, float** out_embeddings, int* out_n_tokens,
                                   int* out_dim);
