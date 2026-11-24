@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frame-level tables (markdown) from results/counts.pkl: speech domains P/R/F1 with bootstrap CIs (recordings resampled within domain), tuned-on-tune/held-out, leave-one-domain-out, non-speech false alarms."""
+"""Frame-level tables (markdown) from results/counts.json: speech domains P/R/F1 with bootstrap CIs (recordings resampled within domain), tuned-on-tune/held-out, leave-one-domain-out, non-speech false alarms."""
 import sys, os, numpy as np, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rl

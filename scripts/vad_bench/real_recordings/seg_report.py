@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 import json, numpy as np, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vr
+import vr, segio
 R = json.load(open(f"{vr.ROOT}/results/seg.json", "r")); M = R["meta"]
-res = {
-    rid: {
-        (k.split("|")[0], k.split("|")[1], float(k.split("|")[2])): np.array(v)
-        for k, v in rdict.items()
-    }
-    for rid, rdict in R["res"].items()
-}
+res = segio.res_from_json(R["res"])
 DOMS = ["vox", "ami", "ava", "music", "noise", "esc"]
 rng = np.random.default_rng(11)
 IDS = {d: [m["id"] for m in M if m["domain"] == d] for d in DOMS}; HRS = {d: sum(m["dur"] for m in M if m["domain"] == d) / 3600 for d in DOMS}

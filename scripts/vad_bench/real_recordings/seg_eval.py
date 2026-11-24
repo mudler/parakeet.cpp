@@ -5,7 +5,7 @@ import os, sys, json, time
 import numpy as np
 from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vr, systems
+import vr, systems, segio
 from vr import FS
 FUS = {"ultra": ("two", "ultra", 0.5, 0.5, 16, 16, 30), "redux": ("two", "redux", 0.5, 0.5, 16, 16, 30)}
 def system_masks(r):
@@ -58,6 +58,6 @@ def work(meta):
 if __name__ == "__main__":
     D = vr.load_recordings(); t = time.time()
     with Pool(8) as p: res = dict(p.map(work, D, chunksize=1))
-    res_json = {rid: {f"{k[0]}|{k[1]}|{k[2]}": v.tolist() for k, v in rdict.items()} for rid, rdict in res.items()}
+    res_json = segio.res_to_json(res)
     json.dump(dict(meta=[dict(id=m["id"], domain=m["domain"], split=m["split"], dur=m["dur"], nonspeech=m["nonspeech"]) for m in D], res=res_json), open(f"{vr.ROOT}/results/seg.json", "w"))
     print("done", time.time() - t)
