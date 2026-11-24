@@ -8,10 +8,13 @@ namespace pk {
 std::vector<float> resample_linear(const std::vector<float>& in, int in_sr, int out_sr) {
     if (in_sr == out_sr || in.empty()) return in;
     const double ratio = (double)out_sr / (double)in_sr;
+    // Bolt optimization: Precompute inv_ratio to replace expensive double division
+    // (i / ratio) in the inner loop with double multiplication (i * inv_ratio).
+    const double inv_ratio = (double)in_sr / (double)out_sr;
     const size_t n_out = (size_t)std::floor(in.size() * ratio);
     std::vector<float> out(n_out);
     for (size_t i = 0; i < n_out; ++i) {
-        const double src = i / ratio;
+        const double src = (double)i * inv_ratio;
         const size_t i0 = (size_t)src;
         const double frac = src - i0;
         const float a = in[i0];
@@ -33,10 +36,20 @@ bool decode_pcm_16k_mono(float* pcm, unsigned int ch, unsigned int sr,
         PK_LOG("invalid wav metadata: %s", source);
         return false;
     }
-    std::vector<float> mono(frames);
-    for (drwav_uint64 i = 0; i < frames; ++i) {
-        double acc = 0; for (unsigned int c = 0; c < ch; ++c) acc += pcm[i*ch + c];
-        mono[i] = (float)(acc / ch);
+    std::vector<float> mono;
+    if (ch == 1) {
+        // Bolt optimization: Fast path for mono audio (ch == 1), avoiding float -> double
+        // conversion, zero-accumulation, per-sample division by 1, and redundant zero-fill.
+        mono.assign(pcm, pcm + frames);
+    } else {
+        // Bolt optimization: Precompute inverse channel count to use multiplication
+        // instead of per-frame double division.
+        mono.resize(frames);
+        const double inv_ch = 1.0 / (double)ch;
+        for (drwav_uint64 i = 0; i < frames; ++i) {
+            double acc = 0; for (unsigned int c = 0; c < ch; ++c) acc += pcm[i*ch + c];
+            mono[i] = (float)(acc * inv_ch);
+        }
     }
     out.samples = resample_linear(mono, (int)sr, 16000);
     out.sample_rate = 16000;

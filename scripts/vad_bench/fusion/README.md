@@ -5,7 +5,7 @@ in [docs/vad-benchmarks.md](../../../docs/vad-benchmarks.md). It is not part of
 parakeet.cpp: the fusion rules are a Python port of the segmenter, and no C++ code
 implements them.
 
-No audio, no probability files and no pickles are committed. The four small result
+No audio, no probability files and no binary results are committed. The four small result
 files are:
 
 | File | What |
@@ -19,7 +19,7 @@ files are:
 
 Every script runs from one working directory (the "work directory") and reads and writes
 files there with relative names: `data/`, `clips/`, `clips.json`, `gap.json`,
-`probs.npz`, `probs_gap.npz`, `results.pkl`. All scripts need `numpy`, `soundfile`;
+`probs.npz`, `probs_gap.npz`, `results.json`. All scripts need `numpy`, `soundfile`;
 `run.py` and `gapeval.py` also need `scikit-learn`; `collect*.py` need `onnxruntime`;
 `prep_libri.py` needs `datasets`; `pr_curves.py` needs `matplotlib`. Run them with
 the work directory as the current directory, for example `python3 /path/to/fusion/run.py`
@@ -43,8 +43,8 @@ python3 mkcorpus.py          # 342 speech clips (38 sets of 5 utterances x 9 con
 python3 mkgap.py             # 96 clips with a 30 s noise stretch between speech
 python3 collect.py           # per-frame probabilities of Silero and both heads -> probs.npz
 python3 collect_gap.py       # the same for the gap clips -> probs_gap.npz
-python3 run.py               # all rules, thresholds and the learned models -> results.pkl
-python3 report.py            # results.md (reads results.pkl)
+python3 run.py               # all rules, thresholds and the learned models -> results.json
+python3 report.py            # results.md (reads results.json)
 python3 gapeval.py           # prints the gap tables
 python3 pr_curves.py         # pr_curves.png and pr_points.csv
 python3 detail.py            # boundary error and missed segments -> detail.json
@@ -65,6 +65,6 @@ builder and the noise.
   rule calls speech and how well the rules agree with each other.
 - `ted.py` fits its logistic regression on the synthetic clips, so it needs `clips.json`,
   `clips/` and `probs.npz` from the steps above.
-- `analyze.py` and `report.py` read `results.pkl` (about 50 MB), which is not committed.
+- `analyze.py` and `report.py` read `results.json` (about 50 MB), which is not committed.
   Run `run.py` to make it. The random seeds are fixed, so a re-run should give the same tables
   on the same probabilities, but this was not checked on a second machine.

@@ -3,19 +3,30 @@
 #include <iomanip>
 #include <locale>
 #include <sstream>
+#include <string_view>
 
 namespace pk {
 // Shared production assembler: nullptr preserves the legacy JSON byte for byte.
 // identity is generated internally; reasons are the fixed SpeakerProfile codes.
-inline std::string named_profiles_json(std::string json, const std::string& names,
+inline std::string named_profiles_json(const std::string& json, const std::string& names,
     const std::map<int, SpeakerProfile>* profiles, const std::string& identity, int dimension) {
-    json.pop_back();
-    json += ",\"names\":" + names;
-    if (!profiles) return json + "}";
+    std::string_view json_trimmed(json);
+    if (!json_trimmed.empty()) {
+        json_trimmed.remove_suffix(1);
+    }
+    if (!profiles) {
+        std::string res;
+        res.reserve(json_trimmed.size() + 10 + names.size() + 1);
+        res.append(json_trimmed);
+        res.append(",\"names\":");
+        res.append(names);
+        res.push_back('}');
+        return res;
+    }
     std::ostringstream out;
     out.imbue(std::locale::classic());
     out << std::setprecision(9);
-    out << json << ",\"speaker_profiles\":{\"version\":1,\"encoder\":{\"identity\":\""
+    out << json_trimmed << ",\"names\":" << names << ",\"speaker_profiles\":{\"version\":1,\"encoder\":{\"identity\":\""
         << identity << "\",\"dimension\":" << dimension << "},\"speakers\":[";
     bool first = true;
     for (const auto& kv : *profiles) {
