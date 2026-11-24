@@ -129,6 +129,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up Python 3.12
+        # ubuntu-latest's default python3 moved to 3.14, where pip resolves
+        # protobuf 5.x against onnx wheels generated with protobuf 6.x and
+        # `import onnx` fails. Pin the interpreter the venv is created from.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install system build dependencies
         run: |
           sudo apt-get update
