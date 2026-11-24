@@ -1,9 +1,9 @@
 #include "llm_loader.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <set>
-#include <unordered_map>
 
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
@@ -252,6 +252,9 @@ std::unique_ptr<LlmLoader> LlmLoader::open(const std::string& path, std::string*
         if (!ok)
             bad.push_back(std::string("tensor ") + s.name + " has type " + ggml_type_name(t->type) +
                           (s.f32_only ? ", expected F32" : ", expected F32, F16 or Q8_0"));
+        else if (t->type == GGML_TYPE_Q8_0 && t->ne[0] % ggml_blck_size(GGML_TYPE_Q8_0) != 0)
+            bad.push_back("tensor " + s.name + " is Q8_0 but its row length " + std::to_string(t->ne[0]) +
+                          " is not a multiple of " + std::to_string(ggml_blck_size(GGML_TYPE_Q8_0)));
     }
     const int64_t nt = gguf_get_n_tensors(g);
     for (int64_t i = 0; i < nt; ++i) {
@@ -268,14 +271,14 @@ std::unique_ptr<LlmLoader> LlmLoader::open(const std::string& path, std::string*
         end = std::max(end, m->data_offset_ + gguf_get_tensor_offset(g, i) + ggml_nbytes(t));
         m->weights_bytes_ += ggml_nbytes(t);
     }
-    if (FILE* f = std::fopen(path.c_str(), "rb")) {
-        std::fseek(f, 0, SEEK_END);
-        const long long size = (long long)std::ftell(f);
-        std::fclose(f);
-        if (size < (long long)end)
-            return fail("the file is truncated: " + std::to_string(size) + " bytes, the tensor table needs " +
-                        std::to_string(end));
-    }
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return fail("cannot reopen " + path + " to check its size");
+    std::fseek(f, 0, SEEK_END);
+    const long long size = (long long)std::ftell(f);
+    std::fclose(f);
+    if (size < (long long)end)
+        return fail("the file is truncated: " + std::to_string(size) + " bytes, the tensor table needs " +
+                    std::to_string(end));
     m->n_tensors_ = (size_t)nt;
     return m;
 }
