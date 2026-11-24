@@ -94,10 +94,12 @@ StreamingDiarization::StreamingDiarization(const ModelLoader& ml, const DiarStre
     }
 
     if (d.use_learnable_sil_emb) {
+        // Realize first: on a device backend it swaps in device tensors, so a
+        // pointer taken before it would dangle.
+        ensure_weights_realized(ml);
         const ggml_tensor* t = ml.tensor("sortformer_modules.learnable_sil_emb");
         if (!t || t->type != GGML_TYPE_F32 || ggml_nelements(t) != d_model_)
             throw std::runtime_error("parakeet: learnable_sil_emb missing or not F32");
-        ensure_weights_realized(ml);
         learnable_sil_emb_.resize(d_model_);
         ggml_backend_tensor_get(t, learnable_sil_emb_.data(), 0, d_model_ * sizeof(float));
         use_learnable_sil_emb_ = true;

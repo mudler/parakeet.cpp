@@ -148,6 +148,7 @@ tests/               ctest targets
                        test_streaming_encoder.cpp, cache-aware streaming encoder == offline + NeMo
                        test_streaming_decode.cpp , streaming RNN-T tokens == NeMo cache-aware streaming
                        test_streaming_eou_reset.cpp, multi-utterance streaming: decoder resets on <EOU>, transcript == NeMo reset-on-EOU (issue #13; PARAKEET_TEST_BASELINE_EOU_RESET)
+                       test_stream_special_pieces.cpp, language tags and the `▁` before them stay out of streamed text and word timestamps (model-independent)
                        test_capi_stream.cpp    , streaming C-API transcript == NeMo streaming (PARAKEET_TEST_BASELINE_EOU_STREAM)
                        test_diarization_accuracy.cpp, offline diarization == NeMo (PARAKEET_TEST_BASELINE_DIAR)
                        test_streaming_diarization.cpp, streaming diarization == NeMo streaming, every latency mode (same baseline)
@@ -478,7 +479,8 @@ semantics. Additive changes (new functions) are fine without bumping.
 
 Streaming semantics: `parakeet_capi_stream_feed` buffers PCM, decodes encoder
 chunks as audio arrives (carried encoder/decoder caches), and returns the
-newly-finalized text (`<EOU>`/`<EOB>` STRIPPED, surfaced via `*eou_out`).
+newly-finalized text (`<EOU>`/`<EOB>` STRIPPED, surfaced via `*eou_out`; other
+special pieces such as language tags are stripped too).
 Since ABI v5 `*eou_out` is a bitmask — `PARAKEET_EVENT_EOU` (end of utterance:
 respond) | `PARAKEET_EVENT_EOB` (backchannel: do not treat as a turn) — and the
 streaming JSON documents carry separate `"eou"`/`"eob"` 0/1 flags (in v4 a
