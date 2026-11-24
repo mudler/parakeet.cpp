@@ -62,6 +62,9 @@ public:
     // registry device name for a GPU backend, e.g. the CUDA device name).
     const char* device_name() const { return device_name_.c_str(); }
 
+    // True when the active device is a ROCm/HIP one (ggml names these "ROCm<N>").
+    bool is_rocm() const { return device_name_.rfind("ROCm", 0) == 0; }
+
     // Size in bytes of this backend's graph allocator buffer (its working set
     // for graph intermediates). It grows to the largest graph run so far and
     // stays there. 0 before the first compute. Safe to call from any thread.

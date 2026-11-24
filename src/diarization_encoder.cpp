@@ -63,6 +63,37 @@ ggml_tensor* DiarizationEncoder::build_pre_encode(ggml_context* ctx, ggml_tensor
     return ggml_mul_mat(ctx, pk::clone_weight(ctx, ml_, "encoder.pre_encode.proj.weight"), x);
 }
 
+// Exact softmax attention with explicit mul_mat + soft_max_ext, used on ROCm
+// where the ggml flash-attn tile kernel faults for this shape (RDNA4 / gfx1201,
+// head dim 64, no mask). q/k/v are [hd, H, T] views; returns [d, T].
+// Queries are processed in blocks so the score tensor is at most
+// T_k x kQueryBlock x H floats instead of T_k x T_q x H. Softmax is per query
+// row, so blocking gives the same result as the unblocked computation.
+static ggml_tensor* explicit_attention(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k,
+                                       ggml_tensor* v, float scale, int d, int64_t T) {
+    constexpr int64_t kQueryBlock = 1024;
+    // [hd, H, T] -> packed [hd, T, H]. mul_mat broadcasts over the head dim.
+    q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
+    k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
+    v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
+    ggml_tensor* vt = ggml_cont(ctx, ggml_permute(ctx, v, 1, 0, 2, 3)); // [T_k, hd, H]
+
+    ggml_tensor* out = nullptr; // [hd, T_q, H]
+    for (int64_t s = 0; s < T; s += kQueryBlock) {
+        const int64_t n = std::min<int64_t>(kQueryBlock, T - s);
+        ggml_tensor* qb = (s == 0 && n == T)
+            ? q
+            : ggml_view_3d(ctx, q, q->ne[0], n, q->ne[2], q->nb[1], q->nb[2], (size_t)s * q->nb[1]);
+        ggml_tensor* scores = ggml_mul_mat(ctx, k, qb); // [T_k, n, H]
+        ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, /*mask=*/nullptr, scale, 0.0f);
+        ggml_tensor* ob = ggml_mul_mat(ctx, vt, probs); // [hd, n, H]
+        out = out ? ggml_concat(ctx, out, ob, 1) : ob;
+    }
+    // [hd, T, H] -> [hd, H, T] packs each frame's heads into d consecutive values.
+    ggml_tensor* attn = ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
+    return ggml_reshape_2d(ctx, attn, d, T);
+}
+
 // x: pre-encoded ne=[d_model, T]; pos: I32 [T]. embed_norm -> blocks ->
 // final_norm, returning ne=[d_model, T]. embed_norm lives here, not in
 // pre_encode, because NeMo applies it after the (bypassable) pre-encoder:
@@ -73,6 +104,7 @@ ggml_tensor* DiarizationEncoder::build_blocks(ggml_context* ctx, ggml_tensor* x,
     const int64_t T = x->ne[1];
     const float scale = 1.0f / std::sqrt((float)hd);
     if (pre_block_norm_) x = layer_norm(ctx, ml_, x, "encoder.embed_norm", ln_eps_);
+    const bool use_explicit_attn = pk::global_backend().is_rocm();
 
     for (int i = 0; i < n_layers_; ++i) {
         const std::string base = "encoder.layers." + std::to_string(i) + ".";
@@ -97,25 +129,18 @@ ggml_tensor* DiarizationEncoder::build_blocks(ggml_context* ctx, ggml_tensor* x,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         k = ggml_rope_ext(ctx, k, pos, nullptr, n_rot_, GGML_ROPE_TYPE_NEOX,
                           0, rope_base_, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
-        v = ggml_cont(ctx, v);
-
-        // [hd, H, T] -> packed [hd, T, H]. mul_mat broadcasts over the head dim.
-        q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
-        k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
-        v = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
-
-        // Exact softmax attention, the same mul_mat + softmax the FastConformer
-        // encoder runs. The previous ggml flash-attn tile kernel faults on ROCm
-        // for this shape (RDNA4 / gfx1201, head dim 64, streaming chunk of 264
-        // with no mask). Streaming chunks stay a few hundred frames, so the
-        // explicit score matrix is small.
-        ggml_tensor* scores = ggml_mul_mat(ctx, k, q); // [T_k, T_q, H]
-        ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, /*mask=*/nullptr, scale, 0.0f);
-        ggml_tensor* vt = ggml_cont(ctx, ggml_permute(ctx, v, 1, 0, 2, 3)); // [T_k, hd, H]
-        ggml_tensor* ctxh = ggml_mul_mat(ctx, vt, probs);                    // [hd, T_q, H]
-        // [hd, H, T] packs each frame's heads into d consecutive values.
-        ggml_tensor* attn = ggml_cont(ctx, ggml_permute(ctx, ctxh, 0, 2, 1, 3));
-        attn = ggml_reshape_2d(ctx, attn, d, T);
+        ggml_tensor* attn;
+        if (use_explicit_attn) {
+            attn = explicit_attention(ctx, q, k, ggml_cont(ctx, v), scale, d, T);
+        } else {
+            // flash_attn_ext takes q/k/v as [hd, T, H] and returns [hd, H, T]
+            // (heads already interleaved per frame), which reshapes to [d, T].
+            q = ggml_permute(ctx, q, 0, 2, 1, 3);
+            k = ggml_permute(ctx, k, 0, 2, 1, 3);
+            v = ggml_permute(ctx, ggml_cont(ctx, v), 0, 2, 1, 3);
+            attn = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
+            attn = ggml_reshape_2d(ctx, ggml_cont(ctx, attn), d, T);
+        }
         x = ggml_add(ctx, x, linear(ctx, ml_, attn, base + "attn.out_proj"));
 
         // Feed-forward: x = x + W2 gelu(W1 norm2(x))
