@@ -73,6 +73,10 @@ StreamingEncoder::StreamingEncoder(const ModelLoader& ml) : ml_(ml) {
 
 void StreamingEncoder::reset() {
     step_ = 0;
+    reset_cache();
+}
+
+void StreamingEncoder::reset_cache() {
     clc_len_ = 0;
     cache_time_.assign(n_layers_,
                        std::vector<float>((size_t)left_pad_ * d_model_, 0.0f));

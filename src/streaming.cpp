@@ -276,18 +276,21 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     //    appears in the chunk text). Without this the prediction net stays
     //    conditioned on the just-emitted <EOU> and the joint scores blank on every
     //    subsequent frame, so the stream goes silent after the first utterance
-    //    (issue #13). We reset the carried RNN-T decoder state — LSTM h/c to zero
-    //    and last_token back to SOS — for the next chunk. We deliberately reset
-    //    ONLY the decoder, not the StreamingEncoder cache: NeMo's reset_state also
-    //    drops the encoder cache, but that was verified to be a no-op for the
-    //    decoded tokens (decoder-only reset == NeMo's full reset_state byte-for-
-    //    byte on multi-utterance clips), so the validated streaming-encoder path is
-    //    left untouched. enc_frame_ keeps running so <EOU> timestamps stay absolute
-    //    in the clip, and state_.hyp keeps the full token record across utterances.
+    //    (issue #13). Like NeMo's reset_state, we reset both the carried RNN-T
+    //    decoder state (LSTM h/c to zero, last_token back to SOS) and the
+    //    StreamingEncoder's attention and convolution caches. The encoder reset is
+    //    not a no-op: with a decoder-only reset, some clips decoded the first
+    //    utterance and then nothing at all for the speech after the <EOU>, while
+    //    a fresh cache decodes it. The step counter is kept, because the next
+    //    window still carries the pre-encode overlap of the audio before it (NeMo
+    //    keeps feeding the same audio buffer). enc_frame_ keeps running so <EOU>
+    //    timestamps stay absolute in the clip, and state_.hyp keeps the full token
+    //    record across utterances.
     if (last_chunk_had_eou_) {
         state_.state      = pred_.zero_state();
         state_.last_token = -1;     // SOS sentinel (nothing emitted yet)
         state_.have_token = false;
+        enc_.reset_cache();
     }
     if (reprocess_this_chunk_ > max_chunk_reprocess_)
         max_chunk_reprocess_ = reprocess_this_chunk_;

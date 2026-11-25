@@ -109,6 +109,7 @@ pk_add_test(test_transcribe_vad)
 pk_add_test(test_vad_batched)
 pk_add_test(test_streaming_decode)
 pk_add_test(test_streaming_eou_reset)
+pk_add_test(test_streaming_eou_continue)  # speech after a mid-stream <EOU> (PARAKEET_TEST_WAV_EOU_CONTINUE)
 pk_add_test(test_streaming_nemotron)
 pk_add_test(test_streaming_mel)
 pk_add_test(test_streaming_longrun_bounded)
@@ -230,7 +231,7 @@ set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling te
                      test_timestamps_tokens test_timestamps test_transcribe_batch_ts test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tiled test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou test_transcribe_nemotron
-                     test_streaming_decode test_streaming_eou_reset test_streaming_nemotron test_streaming_mel test_streaming_longrun_bounded test_capi test_capi_batch test_capi_concurrency test_pool_stress test_pool_shutdown test_capi_stream test_capi_stream_json
+                     test_streaming_decode test_streaming_eou_reset test_streaming_eou_continue test_streaming_nemotron test_streaming_mel test_streaming_longrun_bounded test_capi test_capi_batch test_capi_concurrency test_pool_stress test_pool_shutdown test_capi_stream test_capi_stream_json
                      test_capi_timestamps test_capi_batch_json test_capi_ctc_logits
                      test_combined_offline test_streaming_diarization test_diarization_accuracy test_diarization
                      test_speechlm_audio
@@ -253,7 +254,7 @@ set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_bat
                      test_tokenizer test_transcribe
                      test_transcribe_speech test_transcribe_tiled test_transcribe_tdt test_transcribe_0_6b
                      test_transcribe_ctc test_transcribe_rnnt test_transcribe_eou test_transcribe_nemotron
-                     test_streaming_decode test_streaming_eou_reset test_streaming_nemotron test_streaming_mel test_streaming_longrun_bounded test_capi test_capi_batch test_capi_concurrency test_pool_stress test_pool_shutdown test_capi_stream test_capi_stream_json
+                     test_streaming_decode test_streaming_eou_reset test_streaming_eou_continue test_streaming_nemotron test_streaming_mel test_streaming_longrun_bounded test_capi test_capi_batch test_capi_concurrency test_pool_stress test_pool_shutdown test_capi_stream test_capi_stream_json
                      test_capi_timestamps test_capi_batch_json test_capi_ctc_logits
                      test_combined_offline test_streaming_diarization test_diarization_accuracy test_speechlm_audio test_capi_speechlm_audio test_ternary_model test_ternary_long test_fivevalue_model test_fivevalue_gpu test_transcribe_vad test_vad_batched test_decoder_reuse test_capi_vad
                      PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
