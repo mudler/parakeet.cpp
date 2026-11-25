@@ -38,6 +38,11 @@ public:
     // Reset all caches to zeros and the step counter to 0 (a fresh stream).
     void reset();
 
+    // Reset the attention and convolution caches to zeros but keep the step
+    // counter: the next window still carries the pre-encode overlap of the
+    // audio that came before it. This is NeMo's reset_state() at an <EOU>.
+    void reset_cache();
+
     // Process one mel chunk window. `mel_chunk_frames` is row-major
     // [n_mels, n_mel_frames] (feat-major inner = time), i.e. mel[m*n + t] — the
     // same orientation as the offline encoder's mel input. The window must
